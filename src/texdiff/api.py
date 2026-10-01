@@ -16,8 +16,10 @@ from dataclasses import dataclass
 
 from .align import Delete, Edit, Insert, Match, Modify, align
 from .emit import LatexdiffMarkup, render
+from .flatten import Flattener, flatten_file, flatten_source
 from .nodes import Node, text_node
 from .parse import parse
+from .preamble import count_preamble_changes, split_preamble
 from .textdiff import DELETE, EQUAL, Chunk, word_diff
 
 
@@ -29,16 +31,32 @@ class DiffStats:
     modifications: int = 0
     insertions: int = 0
     deletions: int = 0
+    preamble_changes: int = 0
 
     @property
     def changed(self) -> int:
         """Number of changed blocks (modify+insert+delete)."""
         return self.modifications + self.insertions + self.deletions
 
+    def __add__(self, other: "DiffStats") -> "DiffStats":
+        """Sum two stats (used to layer preamble counts onto body counts)."""
+        return DiffStats(
+            matches=self.matches + other.matches,
+            modifications=self.modifications + other.modifications,
+            insertions=self.insertions + other.insertions,
+            deletions=self.deletions + other.deletions,
+            preamble_changes=self.preamble_changes + other.preamble_changes,
+        )
+
     def __str__(self) -> str:  # pragma: no cover - cosmetic
+        pre = (
+            f", {self.preamble_changes} preamble lines changed"
+            if self.preamble_changes
+            else ""
+        )
         return (
             f"{self.matches} unchanged, {self.modifications} modified, "
-            f"{self.insertions} added, {self.deletions} deleted"
+            f"{self.insertions} added, {self.deletions} deleted{pre}"
         )
 
 
@@ -77,9 +95,16 @@ def diff_documents(
     Returns:
         :class:`DiffResult` with the marked-up document.
     """
-    edits = _diff_nodes(parse(old_source), parse(new_source))
-    stats = _count(edits)
-    marked_up = render(edits, markup)
+    # preamble policy: the output uses the NEW preamble; preamble
+    # differences are counted, never marked up (see texdiff.preamble)
+    pre_old, body_old, post_old = split_preamble(old_source)
+    pre_new, body_new, post_new = split_preamble(new_source)
+    preamble_changes = count_preamble_changes(old_source, new_source)
+
+    edits = _diff_nodes(parse(body_old), parse(body_new))
+    body_markup = render(edits, markup)
+    stats = _count(edits) + DiffStats(preamble_changes=preamble_changes)
+    marked_up = pre_new + body_markup + post_new if pre_new else body_markup
     if inject_preamble and stats.changed:
         marked_up = _inject_preamble(marked_up, new_source)
     return DiffResult(marked_up=marked_up, stats=stats, edits=edits)
@@ -102,15 +127,26 @@ def _inject_preamble(marked_up: str, source: str) -> str:
     return marked_up[:idx] + PREAMBLE_TEMPLATE + marked_up[idx:]
 
 
-def diff_files(old_path: str, new_path: str, **kwargs) -> DiffResult:
-    """Diff two LaTeX files (UTF-8)."""
+def diff_files(
+    old_path: str,
+    new_path: str,
+    flatten: bool = True,
+    **kwargs,
+) -> DiffResult:
+    """Diff two LaTeX files (UTF-8).
+
+    By default the sources are flattened first (``\\input``/``\\include``
+    expanded), like ``latexdiff --flatten``; pass ``flatten=False`` to
+    compare already-flattened sources.
+    """
     from pathlib import Path
 
-    return diff_documents(
-        Path(old_path).read_text(encoding="utf-8"),
-        Path(new_path).read_text(encoding="utf-8"),
-        **kwargs,
-    )
+    def read(p):
+        return Path(p).read_text(encoding="utf-8")
+
+    old_source = flatten_file(old_path) if flatten else read(old_path)
+    new_source = flatten_file(new_path) if flatten else read(new_path)
+    return diff_documents(old_source, new_source, **kwargs)
 
 
 def _diff_nodes(old: list[Node], new: list[Node]) -> list[Edit]:

@@ -13,12 +13,12 @@ The pipeline IS::
 from .align import Delete, Edit, Insert, Match, Modify, align
 from .api import DiffResult, DiffStats, diff_documents, diff_files
 from .emit import LatexdiffMarkup, render
+from .flatten import Flattener, flatten_file, flatten_source
 from .nodes import Node
 from .parse import ParseError, parse, parse_file
 from .textdiff import Chunk, word_diff
 
 __all__ = [
-    "align",
     "align",
     "Chunk",
     "Delete",
@@ -27,6 +27,9 @@ __all__ = [
     "DiffResult",
     "DiffStats",
     "Edit",
+    "Flattener",
+    "flatten_file",
+    "flatten_source",
     "Insert",
     "LatexdiffMarkup",
     "Match",
