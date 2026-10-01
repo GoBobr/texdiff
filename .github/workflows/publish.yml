@@ -1,0 +1,50 @@
+name: Publish
+
+# Build sdist + wheel and publish to PyPI when a version tag (v*) is
+# pushed. Uses PyPI trusted publishing (OIDC): no API token secret is
+# required once the "texdiff" project on PyPI has a trusted publisher
+# configured for this repository/workflow/environment ("pypi").
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write # PyPI trusted publishing (OIDC)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
