@@ -54,11 +54,11 @@ class TestCLI:
         assert e.value.code == 0
 
     def test_console_script_registered(self, docs):
-        # the entry point must exist (pyproject [project.scripts])
-        import tomllib
+        # the entry point must exist (pyproject [project.scripts]);
+        # plain text check: tomllib is stdlib only since 3.11
         from pathlib import Path
 
-        pyproject = tomllib.loads(
-            (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
-        )
-        assert pyproject["project"]["scripts"]["texdiff"] == "texdiff.cli:main"
+        pyproject = (
+            Path(__file__).resolve().parents[1] / "pyproject.toml"
+        ).read_text()
+        assert 'texdiff = "texdiff.cli:main"' in pyproject
