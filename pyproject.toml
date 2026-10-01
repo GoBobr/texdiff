@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "texdiff"
+version = "0.1.0"
+description = "AST-driven semantic diff for LaTeX documents"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "GoBobr" }]
+keywords = ["latex", "diff", "latexdiff", "ast", "track-changes"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing :: Markup :: LaTeX",
+]
+dependencies = [
+    "pylatexenc>=2.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-cov>=4",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocstrings[python]>=0.24",
+]
+
+[project.scripts]
+texdiff = "texdiff.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/GoBobr/texdiff"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+texdiff = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=texdiff --cov-report=term-missing --cov-fail-under=80"
+
+[tool.coverage.run]
+source = ["texdiff"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

@@ -1,0 +1,34 @@
+site_name: texdiff
+site_description: AST-driven semantic diff for LaTeX documents
+repo_url: https://github.com/GoBobr/texdiff
+repo_name: GoBobr/texdiff
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+
+nav:
+  - Home: index.md
+  - Concepts:
+      - Pipeline: concepts/pipeline.md
+      - Node model: concepts/nodes.md
+      - Alignment: concepts/alignment.md
+      - Emitter: concepts/emitter.md
+  - API Reference: api.md
+  - Roadmap: roadmap.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
