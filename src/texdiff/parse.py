@@ -18,6 +18,7 @@ Design decisions (v0):
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from pylatexenc.latexwalker import (
@@ -161,8 +162,10 @@ def _convert(node: LatexNode, source: str) -> Node:
 
     if isinstance(node, LatexEnvironmentNode):
         envname = node.envname
-        if envname in VERBATIM_ENVIRONMENTS or envname in TABLE_ENVIRONMENTS:
+        if envname in VERBATIM_ENVIRONMENTS:
             return Node(kind="env", text=text, name=envname, atom=True)
+        if envname in TABLE_ENVIRONMENTS:
+            return _table_env_node(node, source, envname)
         recursable = envname in TEXT_ENVIRONMENTS
         return Node(
             kind="env",
@@ -174,6 +177,110 @@ def _convert(node: LatexNode, source: str) -> Node:
 
     # unknown pylatexenc node class: keep as an opaque atomic block
     return Node(kind="specials", text=text, atom=True)  # pragma: no cover
+
+
+# --- table ↔ row nodes -------------------------------------------------------
+
+
+def _table_env_node(node: LatexEnvironmentNode, source: str, envname: str) -> Node:
+    """Convert a table environment into a recursable env of row nodes.
+
+    Row splitting is brace-aware (``\\\\makecell{a\\\\\\\\b}`` is one row)
+    and turns ``\\\\endfirsthead``/``\\\\endhead``/``\\\\endfoot``/``\\\\endlastfoot``
+    boundaries into row-kind segments, so the aligner can keep header
+    and body regions separate.
+    """
+    children = _split_table_body(node, source)
+    return Node(
+        kind="env",
+        text=source[node.pos : node.pos + node.len],
+        name=envname,
+        children=children,
+        atom=False,
+    )
+
+
+def _split_table_body(node: LatexEnvironmentNode, source: str) -> list[Node]:
+    """Split a table body (source span) into row nodes.
+
+    A *row* ends at a ``\\\\`` which sits outside braces and outside
+    comments. Everything between the environment's begin/end markup
+    is split at those points; each segment (including its trailing
+    ``\\\\`` and line breaks) becomes one atomic row node whose
+    signature is its normalized content.
+    """
+    body_start = _env_body_start(node, source)
+    body_end = _env_body_end(node, source)
+    body = source[body_start:body_end]
+
+    rows: list[Node] = []
+    seg_start = 0
+    depth = 0
+    i = 0
+    n = len(body)
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            # comment: skip to end of line
+            if i + 1 < n and body[i + 1] == "%":
+                j = body.find("\n", i)
+                i = n if j < 0 else j + 1
+                continue
+            # \\ (row terminator) outside braces
+            if i + 1 < n and body[i + 1] == "\\":
+                if depth == 0:
+                    rows.append(_row_node(body, seg_start, i + 2))
+                    seg_start = i + 2
+                i += 2
+                continue
+            i += 1
+            continue
+        if c == "%":
+            j = body.find("\n", i)
+            i = n if j < 0 else j + 1
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth = max(0, -1 + depth) if depth else 0
+        i += 1
+    if seg_start < n:
+        rows.append(_row_node(body, seg_start, n))
+    return rows
+
+
+def _row_node(body: str, start: int, end: int) -> Node:
+    """Build one row node from a body slice; content-based signature."""
+    text = body[start:end]
+    return Node(
+        kind="row",
+        text=text,
+        name=_row_key(text),
+        atom=True,
+    )
+
+
+def _row_key(text: str) -> str:
+    """Content-based signature of a table row (ordering by content)."""
+    stripped = re.sub(r"\s+", " ", re.sub(r"%[^\n]*", "", text)).strip()
+    return stripped or "\x00empty"
+
+
+def _env_body_start(node: LatexEnvironmentNode, source: str) -> int:
+    """Offset just past ``\\begin{env}`` (and its possible [arg])."""
+    m = re.match(r"\s*\\begin\{[a-zA-Z*]+\}(\[[^\]]*\])?", source[node.pos :])
+    if m:
+        return node.pos + m.end()
+    return node.pos + 1  # pragma: no cover
+
+
+def _env_body_end(node: LatexEnvironmentNode, source: str) -> int:
+    """Offset of the ``\\end{env}`` (last occurrence)."""
+    end = f"\\end{{{node.envname}}}"
+    idx = source.rfind(end, node.pos, node.pos + node.len)
+    if idx < 0:  # pragma: no cover - round-trip check would catch it
+        return node.pos + node.len
+    return idx
 
 
 def _span(node: LatexNode, source: str) -> str:

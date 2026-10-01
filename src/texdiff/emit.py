@@ -28,9 +28,13 @@ class LatexdiffMarkup:
 
     * *inline* (``\\DIFadd{...}``) for text runs - wavy underline /
       strike-through; LR-mode only, must not contain block structure;
-    * *block* (``\\DIFaddbegin ... \\DIFaddend``) for environments,
-      tables, multi-line content - colour-only, no paragraph-breaking,
-      safe around ``\\begin{...}``/``\\end{...}``.
+    * *block* (``\\DIFaddbegin ... \\DIFaddend``) around whole
+      nodes whose content cannot live inside a macro argument
+      (environments, tables, multi-line runs). Block markers are
+      NO-OP macros (like latexdiff's ``FL`` float variants): a colour
+      group between ``\\\\`` and ``\\hline`` provokes
+      ``Misplaced \\noalign`` in tables, so block regions carry no
+      visible styling by themselves.
     """
 
     add_open: str = "\\DIFadd{"
@@ -127,9 +131,13 @@ def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
     Inline ``\\DIFadd{...}`` is LR-mode-only: it must never contain a
     macro-with-argument (the braces would steal the argument), an
     environment, or a line break. Those all take the block form, whose
-    markers are LaTeX comments - they cannot break anything that
+    markers are no-op macros - they cannot break anything that
     compiled before.
     """
+    if node.kind == "row":
+        # table rows: wrap each cell's text but keep & and \\
+        # outside markup - \DIFdel{a & b} is illegal in alignment
+        return _wrap_row(node, markup, added)
     if _needs_block(node):
         if added:
             return f"{markup.block_add_open}{node.text}{markup.block_add_close}"
@@ -137,6 +145,38 @@ def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
     if added:
         return _wrap(node.text, markup.add_open, markup.add_close)
     return _wrap(node.text, markup.del_open, markup.del_close)
+
+
+_ROW_SPLIT_RE = re.compile(r"(&|\\\\|\\hline|\\end(?:firsthead|head|foot|lastfoot)|\\end\{[a-zA-Z*]+\})")
+
+
+def _wrap_row(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
+    """Mark up a table row region: block markers + per-cell inline.
+
+    Row regions may contain several physical rows (a delete run);
+    tokens that carry table structure (``&``, ``\\\\``, ``\\hline``,
+    boundaries) are kept outside the inline markup; surrounding text
+    runs get the inline wrap. Block markers (no-op) delimit the
+    region as a whole.
+    """
+    open_, close = (markup.add_open, markup.add_close) if added else (
+        markup.del_open,
+        markup.del_close,
+    )
+    b_open = markup.block_add_open if added else markup.block_del_open
+    b_close = markup.block_add_close if added else markup.block_del_close
+
+    parts = _ROW_SPLIT_RE.split(node.text)
+    marked: list[str] = []
+    for part in parts:
+        if part and _ROW_SPLIT_RE.fullmatch(part):
+            marked.append(part)  # structural token: verbatim
+        elif part and part.strip():
+            marked.append(_wrap(part, open_, close))
+        else:
+            marked.append(part)  # whitespace
+    body = "".join(marked)
+    return f"{b_open}{body}{b_close}"
 
 
 def _needs_block(node: Node) -> bool:
@@ -227,10 +267,10 @@ PREAMBLE_TEMPLATE = """\
 \\RequirePackage{color} %DIF PREAMBLE
 \\providecommand{\\DIFadd}[1]{{\\protect\\color{blue}\\uwave{{#1}}}} %DIF PREAMBLE
 \\providecommand{\\DIFdel}[1]{{\\protect\\color{red}\\sout{{#1}}}} %DIF PREAMBLE
-%DIF block markers: no-op layout-wise, they only switch colour
-\\providecommand{\\DIFaddbegin}{{\\protect\\color{blue}}} %DIF PREAMBLE
-\\providecommand{\\DIFaddend}{{\\protect\\color{black}}} %DIF PREAMBLE
-\\providecommand{\\DIFdelbegin}{{\\protect\\color{red}}} %DIF PREAMBLE
-\\providecommand{\\DIFdelend}{{\\protect\\color{black}}} %DIF PREAMBLE
+%DIF block markers: no-op (colour groups break \\hline in tables)
+\\providecommand{\\DIFaddbegin}{} %DIF PREAMBLE
+\\providecommand{\\DIFaddend}{} %DIF PREAMBLE
+\\providecommand{\\DIFdelbegin}{} %DIF PREAMBLE
+\\providecommand{\\DIFdelend}{} %DIF PREAMBLE
 %DIF END PREAMBLE EXTENSION ADDED BY texdiff
 """
