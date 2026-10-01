@@ -93,6 +93,15 @@ def align(old: list[Node], new: list[Node]) -> list[Edit]:
             o, n = old[block.a + i], new[block.b + i]
             if o.text == n.text:
                 edits.append(Match(node=o))
+            elif o.kind == "row" and n.kind == "row" and o.name == n.name:
+                # equal row signature (content key) with differing text
+                # means the difference is purely structural: \hline on
+                # the other side of the row, whitespace, comments.
+                # Duplicating such a pair (del + add) would emit the
+                # table header material (\endfirsthead, \endhead ...)
+                # twice inside one longtable, which can throw longtable
+                # into an infinite loop. Keep the old row verbatim.
+                edits.append(Match(node=o))
             else:
                 edits.append(Modify(old=o, new=n))
         prev_a, prev_b = block.a + block.size, block.b + block.size

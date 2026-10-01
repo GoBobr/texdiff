@@ -260,18 +260,67 @@ def _row_node(body: str, start: int, end: int) -> Node:
     )
 
 
+# pure table structure: makes or breaks nothing visually by itself and
+# code-generators freely move it across row boundaries (\hline before
+# vs after a row); row signatures must ignore it or rows flip between
+# "deleted" and "added" wholesale
+_STRUCT_TOKEN_RE = re.compile(
+    r"\\(?:hline|hdashline|toprule|midrule|bottomrule"
+    r"|endfirsthead|endhead|endfoot|endlastfoot"
+    r"|cline\s*\{[^{}]*\})"
+)
+
+
 def _row_key(text: str) -> str:
-    """Content-based signature of a table row (ordering by content)."""
-    stripped = re.sub(r"\s+", " ", re.sub(r"%[^\n]*", "", text)).strip()
-    return stripped or "\x00empty"
+    """Content-based signature of a table row (ordering by content).
+
+    Structural tokens (``\\\\hline``, ``\\\\``, ``\\\\endhead`` ...)
+    are stripped first: two generators may emit ``row \\\\ \\hline``
+    and ``\\hline row \\\\`` for the same logical row, and those must
+    compare equal or the whole table degrades into delete+add runs.
+    """
+    stripped = re.sub(r"%[^\n]*", "", text)
+    stripped = _STRUCT_TOKEN_RE.sub(" ", stripped)
+    stripped = stripped.replace("\\\\", " ")
+    return re.sub(r"\s+", " ", stripped).strip() or "\x00empty"
 
 
 def _env_body_start(node: LatexEnvironmentNode, source: str) -> int:
-    """Offset just past ``\\begin{env}`` (and its possible [arg])."""
-    m = re.match(r"\s*\\begin\{[a-zA-Z*]+\}(\[[^\]]*\])?", source[node.pos :])
-    if m:
-        return node.pos + m.end()
-    return node.pos + 1  # pragma: no cover
+    """Offset just past ``\\begin{env}`` plus its arguments.
+
+    Skips the optional ``[...]`` AND the mandatory ``{colspec}`` group
+    (brace-depth aware: ``{|W{.25}|W{.07}|}`` nests one level): the
+    column specification belongs to the table structure, never to a
+    row - markup between ``\\begin{env}`` and its colspec provokes
+    ``Illegal pream-token`` in the array package.
+    """
+    m = re.match(r"\s*\\begin\{[a-zA-Z*]+\}", source[node.pos :])
+    if not m:  # pragma: no cover - parse guarantees this exists
+        return node.pos + 1
+    i = node.pos + m.end()
+    rest = source[i:]
+    m_opt = re.match(r"\s*\[[^\]]*\]", rest)
+    if m_opt:
+        i += m_opt.end()
+        rest = source[i:]
+    m_open = re.match(r"\s*\{", rest)
+    if m_open:
+        start = i + m_open.end()
+        depth = 1
+        j = start
+        while j < len(source) and depth > 0:
+            c = source[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            elif c == "%":  # pragma: no cover - degenerate colspec
+                nl = source.find("\n", j)
+                j = len(source) if nl < 0 else nl
+                continue
+            j += 1
+        return j
+    return i
 
 
 def _env_body_end(node: LatexEnvironmentNode, source: str) -> int:

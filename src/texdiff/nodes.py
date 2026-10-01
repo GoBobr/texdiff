@@ -60,10 +60,34 @@ class Node:
         Two nodes are aligned candidate-wise when their signatures are
         equal and their exact source differs (then we diff inside);
         nodes with equal signature AND equal text are identical.
+
+        For group-like nodes the signature carries a *content anchor*:
+        the key of the first table row found inside (typically the
+        ``\\caption`` row of a ``longtable``). Without it every
+        ``{\\scriptsize \\begin{longtable}...}`` group would share the
+        bare signature ``group`` and a shifted positional match could
+        pair two *different* generated tables - whose column counts
+        then disagree and the marked-up document no longer compiles.
+        The anchor ties each table to its true counterpart as long as
+        its caption (or first row) is stable, which holds even when
+        every data row changed.
         """
-        if self.name:
+        if self.name and self.kind not in ("group", "env"):
             return f"{self.kind}:{self.name}"
+        if self.kind in ("group", "env"):
+            base = f"{self.kind}:{self.name}" if self.name else self.kind
+            anchor = self._row_anchor()
+            if anchor:
+                return f"{base}:{anchor}"
+            return base
         return self.kind
+
+    def _row_anchor(self) -> str | None:
+        """Key of the first table row in this subtree, if any."""
+        for node in self.walk():
+            if node.kind == "row" and node.name:
+                return node.name[:64]
+        return None
 
 
 def text_node(s: str) -> Node:
