@@ -32,15 +32,29 @@ Restructured tables (re-ordered rows, changed column layouts), math,
 listings and verbatim environments are handled as atomic or row-aligned
 blocks instead of being shredded by a word diff.
 
-## Goal
+Multi-file sources are flattened automatically (`\input`/`\include`
+resolved relative to each file, like `latexdiff --flatten`), and the
+preamble of the new revision is used verbatim so custom classes and
+macros keep working.
+
+## Usage
 
 ```sh
 texdiff old/main.tex new/main.tex > diff.tex   # \input expansion built in
 pdflatex diff.tex                              # done - no pre/postprocessing
+texdiff old.tex new.tex -o diff.tex --check    # + fail loudly if it won't compile
+texdiff old.tex new.tex --stats                # "611 unchanged, 29 added, ..."
 ```
 
-Status: **early concept, not yet usable.** Development notes and design
-decisions will land in this repository.
+```sh
+pip install texdiff        # or from a checkout:
+pip install -e ".[dev]" && pytest
+```
+
+Status: **v0.2.0** — core pipeline plus flattening, row-granular table
+alignment, preamble policy, `--check` and a compile-guaranteed corpus in
+CI; validated on a 65-page generated longtable-heavy document. See the
+[roadmap](https://gobobr.github.io/texdiff/roadmap/) for what is next.
 
 ## License
 

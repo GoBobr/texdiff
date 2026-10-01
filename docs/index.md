@@ -20,7 +20,7 @@ user eventually maintains a pile of fragile pre/post-processing scripts.
 
 ## Status
 
-**v0 (this milestone):** parse (pylatexenc) → align → render pipeline with the
+**v0.2.0:** parse (pylatexenc) → align → render pipeline with the
 three latexdiff-killer guarantees:
 
 1. unchanged node text round-trips byte-identically,
@@ -28,9 +28,19 @@ three latexdiff-killer guarantees:
    macros, specials),
 3. restructured tables align as row sequences instead of being shredded.
 
-Not yet in v0 (see [roadmap](roadmap.md)): `\input` expansion, preamble
-diffing, the full changerecord/table refinement logic known from the
-`aux-data-spec-common` latexdiff toolkit.
+Now also in:
+
+- `\input`/`\include` flattening (relative to each file, marker
+  comments optional),
+- row-granular table alignment that survives regenerated tables
+  (`\hline` moving across row boundaries), with alignment-safe cell
+  markup,
+- new-revision preamble policy with change counts in `--stats`,
+- `--check`: compile the marked-up result and fail loudly,
+- compile-guaranteed golden corpus in CI.
+
+Next (see [roadmap](roadmap.md)): move-detection thresholds, a
+`latexdiff` fallback engine for hostile documents.
 
 ## Quick look
 
@@ -44,8 +54,13 @@ print(result.stats)      # "N unchanged, M modified, I added, D deleted"
 
 ```sh
 pip install -e ".[dev]"
-pytest                # runs the contract test-suite with coverage gate
+pytest                          # contract test-suite with coverage gate
+texdiff old.tex new.tex -o diff.tex --check   # diff + compile check
 ```
+
+Diffs of multi-file sources are flattened automatically (like
+`latexdiff --flatten`), with `\input` targets resolved relative to
+each file.
 
 ## License
 
