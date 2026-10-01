@@ -1,0 +1,65 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{longtable}
+\usepackage{booktabs}
+\begin{document}
+
+\section{Product Description}
+
+The \textit{Aurora} multispectral imager provides measurements in
+three spectral bands. Table~\ref{tab:bands} lists the characteristics
+of each channel.
+
+\begin{longtable}{|l|c|c|}
+\caption{Spectral bands}\label{tab:bands}\\
+\hline
+Band & Wavelength & Resolution\\
+\hline
+\endfirsthead
+\hline
+Band & Wavelength & Resolution\\
+\hline
+\endhead
+blue   & 443 nm & 300 m\\
+green  & 555 nm & 300 m\\
+red    & 670 nm & 300 m\\
+\hline
+\end{longtable}
+
+\subsection{Geometric accuracy}
+
+The geolocation error is computed as
+\begin{equation}
+  \epsilon = \sqrt{(\Delta x)^2 + (\Delta y)^2}
+\end{equation}
+where $\Delta x$ and $\Delta y$ are the along-track and cross-track
+residuals, respectively.
+
+\begin{itemize}
+\item boresight calibration performed monthly
+\item thermal distortion model v3
+\end{itemize}
+
+\begin{verbatim}
+calibration_report_v2.txt
+  band 1: offset = 0.42
+  band 2: offset = 0.17
+\end{verbatim}
+
+\subsubsection{Data format}\label{sec:format}
+
+Products are distributed in a table-driven format; see
+Table~\ref{tab:fields} for the variable list.
+
+\begin{longtable}{|l|l|}
+\hline
+Variable & Type\\
+\hline
+time       & double\\
+latitude   & float32\\
+longitude  & float32\\
+quality    & uint8\\
+\hline
+\end{longtable}
+
+\end{document}
