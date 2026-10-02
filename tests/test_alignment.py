@@ -522,3 +522,65 @@ def test_rewritten_single_paragraph_run_also_retires() -> None:
     assert "alpha beta" not in out or "\\DIFdel{" in out
     assert "\\DIFdel{alpha beta gamma delta epsilon zeta}" in out
     assert "\\DIFadd{one two three four five six seven}" in out
+
+
+# --- alignment glue between an insert run and paragraph separators ----------
+
+
+def test_whitespace_glue_modify_does_not_break_paragraph() -> None:
+    # a Modify pairing the old revision's paragraph separator with
+    # new text continuation (the ICD 4.5.4 case: old source ended at
+    # the listing, new source adds a sentence, the alignment pairs
+    # the old '\n\n' with the new tail starting mid-sentence) must
+    # not emit the whitespace side as block markup - its blank lines
+    # would form a paragraph break in the middle of the sentence,
+    # orphaning the period after a listing's closing '";}'
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Logging functions are defined below.\n\n"
+        "\\begin{verbatim}\n#define LOG(x) x\n\\end{verbatim}\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Logging functions are defined below.\n\n"
+        "\\begin{verbatim}\n#define LOG(x) x\n\\end{verbatim}\n"
+        "\n\nThe macros are used like FOO(x);. The\n"
+        "stream continues on the same line.\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    # no paragraph break may sit between the two halves of the added
+    # run: the ghost delete's whitespace must not be emitted between
+    # consecutive \\DIFaddend / \\DIFaddbegin crossings
+    idx = out.find("FOO(x);.")
+    assert idx > 0
+    between = out[idx : out.find("stream continues", idx)]
+    assert between.count("\n\n") == 0
+    # and the sentence itself stays intact (no orphaned period)
+    assert "FOO(x);. The\nstream" in out
+
+
+def test_whitespace_glue_modify_end_of_paragraph() -> None:
+    # symmetric case: an insert run ENDS by pairing new whitespace
+    # with old trailing text - the old text keeps its markup, the
+    # whitespace side passes through plain (it cannot carry a
+    # \DIFdelbegin block that emits a visible break either)
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Old paragraph text.\n\n"
+        "Stays.\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "New paragraph text.\n\n"
+        "Stays.\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    # lightly-reworded paragraph stays word-level (the glue path was
+    # never hit here - word refinement handles it); the point is no
+    # stray paragraph break appears between marked halves
+    assert "\DIFdel{Old}\\DIFadd{New} paragraph text." in out
+    assert out.count("\\DIFdelbegin\n\n\n\\DIFdelend") == 0

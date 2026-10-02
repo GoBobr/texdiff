@@ -254,3 +254,71 @@ class TestEmitWiring:
         out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
         assert "{\\color{red}" in out
         assert "\\sout{" in out
+
+
+class TestRetiredTablePolicy:
+    """Old-then-new ordering, shared numbering for replaced tables."""
+
+    def test_retired_table_precedes_inserted_replacement(self):
+        # insert-first alignment: the new table's Edit comes before
+        # the old table's Delete; the render must still emit the
+        # retired red table first, then the blue replacement
+        rows_old = "\n".join(f"var{i} & type{i} & desc{i}\\\\" for i in range(6))
+        rows_new = "\n".join(f"new{i} & other{i} & different{i}\\\\" for i in range(3))
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            f"\\begin{{longtable}}{{lll}}\n\\caption{{grid specs}}\n"
+            f"{rows_old}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            f"\\begin{{longtable}}{{lll}}\n\\caption{{model params}}\n"
+            f"{rows_new}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        i_red = out.find("{\\color{red}")
+        # the pair may render wholesale (blue block after red) or as
+        # a DIFadd-wrapped insert after the retired block; either way
+        # the retired table must come FIRST
+        if i_red >= 0:
+            candidates = [m for m in (out.find("{\\color{blue}"), out.find("\\DIFaddbegin")) if m >= 0]
+            assert not candidates or i_red < min(candidates)
+        else:
+            # insert-first alignment with merge path: assert the
+            # retired table exists somewhere by struck caption
+            assert "\\caption[]{\\texorpdfstring" in out
+
+    def test_retired_caption_is_struck_unnumbered_counter_neutral(self):
+        # the retired table's caption keeps its struck text but must
+        # not add a list-of-tables entry and must not consume a table
+        # number: the blue replacement takes the number instead
+        rows_old = "\n".join(f"var{i} & type{i} & desc{i}\\\\" for i in range(6))
+        rows_new = "\n".join(f"entirely{i} & new{i} & content{i}\\\\" for i in range(3))
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            f"\\begin{{longtable}}{{lll}}\n\\caption{{sales figures}}\n"
+            f"{rows_old}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            f"\\begin{{longtable}}{{lll}}\n\\caption{{model params}}\n"
+            f"{rows_new}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        struck = tables.strike_through(
+            "\\caption{sales figures}\n"
+        )
+        assert "\\caption[]{" in struck
+        assert "\\sout{sales figures}" in struck
+        assert "\\addtocounter{table}{-1}" in struck
+
+    def test_strike_through_guarded_caption_e2e(self):
+        # strike_through applies the guard to real caption lines
+        struck = tables.strike_through("Grid of something:\n\\caption{Regular grid, layer and parameter}\nvar & x\\\\\n")
+        assert "\\caption[]{\\texorpdfstring{\\sout{Regular grid, layer and parameter}}{}}" in struck
+        # the word after the caption is still struck normally
+        assert "\\sout{var}" in struck

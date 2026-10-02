@@ -57,6 +57,11 @@ REAPPEAR_FRAC = 0.50
 _MAX_SINGLE_PAGE_ROWS = 25  # more rows -> multi-page rendering path
 _MAX_SINGLE_PAGE_LINES = 120
 
+# marker comment the emit-side retired-table detection keys off: a
+# restructured pair renders within ONE render call, so only the emit
+# side (a lone Delete before a lone Insert) needs marker scanning
+RESTRUCTURED_MARKER = "% texdiff: restructured table - new version from source (blue)\n"
+
 _ROW_LINE_RE = re.compile(r"(^|[^\\])&(?!\\)|\\\\")
 _STRUCT_BEGIN_RE = re.compile(
     r"^\s*\\(?:hline|begin\{longtable|end\{longtable|begin\{tabular|end\{tabular)"
@@ -168,6 +173,11 @@ def _add_breakpoints(s: str) -> str:
     return re.sub(r"(\\_)(?!\s*\\allowbreak)", r"\1\\allowbreak ", s)
 
 
+# a full \caption{...} call; the body must be brace-balanced on ONE
+# line (captions in generated spec tables always are)
+_CAPTION_RE = re.compile(r"(\\caption)(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})")
+
+
 def strike_through(text: str) -> str:
     """Render a clean old table text red-struck, per word.
 
@@ -181,6 +191,34 @@ def strike_through(text: str) -> str:
     in_row = False
     lines = _fix_cell_counts(_add_breakpoints(text)).split("\n")
     for line in lines:
+        # caption line: a retired table's caption typesets struck like
+        # its rows but must stay transparent to numbering - it neither
+        # steps the table counter nor writes a list-of-tables entry,
+        # so the blue replacement keeps the number the retired table
+        # would have taken (captions *of and only of* retired tables
+        # pass through strike_through; live ones never do)
+        mcap = _CAPTION_RE.search(line)
+        if mcap:
+            begin, body = mcap.groups()
+            out.append(
+                line[: mcap.start()]
+                # empty optional argument: the caption typesets (with
+                # its Table N: label, struck like the table body) but
+                # writes NO list-of-tables entry; the immediate
+                # \addtocounter{table}{-1} then gives the number back,
+                # so the blue replacement caption takes the very
+                # number the retired table carried - they read as one
+                # logical "Table N (old) -> Table N (new)" pair
+                + begin
+                + "[]{\\texorpdfstring{"
+                + _strike_word(body[1:-1])
+                + "}{}"
+                + "}"
+                + "\\addtocounter{table}{-1}% texdiff: "
+                "retired caption - struck, unnumbered, counter-neutral\n"
+                + line[mcap.end() :]
+            )
+            continue
         if _STRUCT_BEGIN_RE.match(line) or not line.strip() or _HEADFOOT_RE.search(line):
             out.append(line)
             continue
@@ -228,7 +266,7 @@ def render_restructured(old_text: str, new_text: str) -> str:
     parts = ["{\\color{red}\n", strike_through(old_text), "}\n"]
     if new_text:
         parts += [
-            "% texdiff: restructured table - new version from source (blue)\n",
+            RESTRUCTURED_MARKER,
             "{\\color{blue}\n",
             new_text,
             "}\n",

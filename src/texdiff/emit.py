@@ -79,18 +79,20 @@ def render(edits: list[Edit], markup: LatexdiffMarkup = LatexdiffMarkup()) -> st
     the way the reference build does.
     """
     out: list[str] = []
-    for edit in _coalesce(edits):
+    for edit in _hoist_retired_tables(_coalesce(edits)):
         if isinstance(edit, Match):
             out.append(edit.node.text)
         elif isinstance(edit, Insert):
             out.append(_wrap_node(edit.new, markup, added=True))
         elif isinstance(edit, Delete):
             span = _table_span(edit.old.text)
+            rendered = None
             if span is not None and tables.data_rows(span[2]) >= RETIRE_MIN_ROWS:
                 # retired table: struck-through old version, visible
-                out.append(_emit_deleted_table(edit.old))
+                rendered = _emit_deleted_table(edit.old)
             else:
-                out.append(_wrap_node(edit.old, markup, added=False))
+                rendered = _wrap_node(edit.old, markup, added=False)
+            out.append(rendered)
         elif isinstance(edit, Modify):
             if edit.old.kind == "env" and edit.old.name in VERBATIM_ENVIRONMENTS:
                 # changed verbatim-like environment: latexdiff's
@@ -124,10 +126,86 @@ def render(edits: list[Edit], markup: LatexdiffMarkup = LatexdiffMarkup()) -> st
                 # recurse into the changed environment/group, keeping
                 # its \begin{...}/\end{...} (or brace) wrapper intact
                 out.append(_render_recursed(edit, markup))
+            elif _align_state(edit):
+                # alignment glue: a Modify that pairs one side's
+                # paragraph separator (whitespace-only text) with the
+                # other side's real text is a pure insertion/deletion
+                # in disguise. Rendering the whitespace side through
+                # the block markup emits nothing visible but its
+                # blank-lines content - a paragraph break in the
+                # middle of a sentence ("...message";} ** here ** . The
+                # stream..."). It is emitted as the plain separator it
+                # is and only the content side takes markup.
+                if edit.new.text.strip():
+                    out.append(_wrap_node(edit.new, markup, added=True))
+                else:
+                    out.append(_wrap_node(edit.old, markup, added=False))
+                    out.append(edit.new.text)
             else:
                 out.append(_wrap_node(edit.old, markup, added=False))
                 out.append(_wrap_node(edit.new, markup, added=True))
     return "".join(out)
+
+
+def _hoist_retired_tables(edits: list[Edit]) -> list[Edit]:
+    """Reorder ``Insert(new table) ... Delete(old table)`` pairs.
+
+    The alignment can pair a restructured-table replacement as
+    Insert(new)-before-Delete(old) (it anchors on which ever side the
+    neighbouring matches sit). A replaced table reads old-then-new -
+    the retired red table first, the blue replacement right after -
+    so this pre-pass swaps the two, keeping any whitespace-only
+    matches between them attached after the hoisted deletion.
+
+    The swap is narrow on purpose: the insert must carry a longtable,
+    the deleted node must hold a retireable longtable (data-row
+    count), and only whitespace may sit between the two. Anything
+    else - restructured Modify renders (old+new table in one edit,
+   Delete containing prose, several edits in between - is untouched.
+    """
+    out: list[Edit] = []
+    pending: Insert | None = None
+    for edit in edits:
+        if isinstance(edit, Insert) and "\\begin{longtable" in edit.new.text:
+            if pending is not None:
+                out.append(pending)
+            pending = edit
+            continue
+        if (
+            pending is not None
+            and isinstance(edit, Delete)
+            and _is_retirable_table(edit.old.text)
+        ):
+            out.append(edit)
+            out.append(pending)
+            pending = None
+            continue
+        if isinstance(edit, Match) and not edit.node.text.strip():
+            if pending is not None:
+                out.append(edit)
+                continue
+        if pending is not None:
+            out.append(pending)
+            pending = None
+        out.append(edit)
+    if pending is not None:
+        out.append(pending)
+    return out
+
+
+def _is_retirable_table(text: str) -> bool:
+    """True when a deleted node's text is a retireable longtable region."""
+    span = _table_span(text)
+    if span is None:
+        return False
+    return tables.data_rows(span[2]) >= RETIRE_MIN_ROWS
+
+
+def _align_state(edit: Modify) -> bool:
+    """True when one side of a text-text Modify is whitespace-only."""
+    return (edit.old.kind == "text" and edit.new.kind == "text") and (
+        not edit.old.text.strip() or not edit.new.text.strip()
+    )
 
 
 _TABLE_SPAN_RE = re.compile(r"\\begin\{longtable\*?\}.*?\\end\{longtable\*?\}", re.S)
