@@ -17,8 +17,14 @@ them to our own lightweight :class:`Node` records first. Each node
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
+
+# sectioning macros whose {\title} becomes part of the signature
+_SECTIONING_RE = re.compile(
+    r"\s*\\(?:chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?\s*\{"
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,15 @@ class Node:
         every data row changed.
         """
         if self.name and self.kind not in ("group", "env"):
+            if self.kind == "macro" and _SECTIONING_RE.match(self.text or ""):
+                # sectioning macros: carry the title. Without it every
+                # \subsubsection* shares one signature and a heading
+                # inserted mid-document shifts every later heading by
+                # one - the aligner then retires the old titles just
+                # to re-add them as insertions further down.
+                title = self._heading_title()
+                if title:
+                    return f"{self.kind}:{self.name}:{title}"
             return f"{self.kind}:{self.name}"
         if self.kind in ("group", "env"):
             base = f"{self.kind}:{self.name}" if self.name else self.kind
@@ -81,6 +96,22 @@ class Node:
                 return f"{base}:{anchor}"
             return base
         return self.kind
+
+    def _heading_title(self) -> str | None:
+        """Normalised title argument of a sectioning macro, if any."""
+        m = re.match(r"\\[a-zA-Z]+\*?\s*(\[[^\]]*\])?\s*\{", self.text or "")
+        if not m:
+            return None
+        title = (self.text or "")[m.end() :]  # after the opening brace
+        depth = 1
+        for i, ch in enumerate(title):
+            if ch == "{" and (i == 0 or title[i - 1] != "\\"):
+                depth += 1
+            elif ch == "}" and (i == 0 or title[i - 1] != "\\"):
+                depth -= 1
+                if depth == 0:
+                    return re.sub(r"\s+", " ", title[:i]).strip() or None
+        return None
 
     def _row_anchor(self) -> str | None:
         """Key of the first table row in this subtree, if any."""

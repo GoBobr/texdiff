@@ -62,10 +62,36 @@ class TestEnvironment:
 class TestInlineVsBlock:
     def test_macro_nodes_take_block_form(self):
         """\DIFadd{\cmd} would steal the argument braces - must not happen."""
-        node = Node(kind="macro", text="\\section{Intro}", name="section")
+        node = Node(kind="macro", text="\\usepackage{geometry}", name="usepackage")
         out = render([Insert(new=node)])
         assert "\\DIFaddbegin" in out
         assert "\\DIFadd{" not in out
+
+    def test_added_sectioning_marks_title(self):
+        """TOC lines are written from the argument: inserted section
+        headings need \DIFadd inside the braces, not just block colours."""
+        node = Node(kind="macro", text="\\section{Intro}", name="section")
+        out = render([Insert(new=node)])
+        assert "\\DIFaddbegin" in out
+        assert "\\section{\\DIFadd{Intro}}" in out
+
+    def test_added_starred_sectioning_marks_title(self):
+        node = Node(
+            kind="macro", text="\\subsubsection*{API function}", name="subsubsection"
+        )
+        out = render([Insert(new=node)])
+        assert "\\subsubsection*{\\DIFadd{API function}}" in out
+
+    def test_sectioning_title_with_macro_stays_block_only(self):
+        """Unsafe titles (macro-with-arg) fall back to block colouring."""
+        node = Node(
+            kind="macro", text="\\section{\\texorpdfstring{$x$}{x} title}", name="section"
+        )
+        out = render([Insert(new=node)])
+        assert "\\DIFaddbegin" in out
+        assert "DIFadd{" not in out.replace("\\DIFaddbegin", "").replace(
+            "\\DIFaddend", ""
+        )
 
     def test_multiline_text_takes_block_form(self):
         node = text_node("first\nsecond")

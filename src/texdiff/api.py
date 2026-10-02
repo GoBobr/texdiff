@@ -105,10 +105,17 @@ def diff_documents(
     pre_new, body_new, post_new = split_preamble(new_source)
     preamble_changes = count_preamble_changes(old_source, new_source)
 
+    # cross-revision context: added lines that already existed in the
+    # old revision render black, not blue (refine-diff semantics)
+    from . import oldlines
+
+    oldlines.mark_old_lines(old_source)
+
     edits = _diff_nodes(parse(body_old), parse(body_new))
     body_markup = render(edits, markup)
     stats = _count(edits) + DiffStats(preamble_changes=preamble_changes)
     marked_up = pre_new + body_markup + post_new if pre_new else body_markup
+    marked_up = _fix_listing_languages(marked_up)
     if pre_new:
         # change-record and other body-invoked preamble macros:
         # their typeset content would otherwise silently swallow
@@ -117,6 +124,23 @@ def diff_documents(
     if inject_preamble and stats.changed:
         marked_up = _inject_preamble(marked_up, new_source)
     return DiffResult(marked_up=marked_up, stats=stats, edits=edits)
+
+
+def _fix_listing_languages(marked_up: str) -> str:
+    """Drop ``language=<lang>,`` from document-level ``\\lstset`` calls.
+
+    The marked-up listings carry ``[alsolanguage=DIFcode]`` so the
+    ``%DIF`` line markers render as strikeout/blue instead of literal
+    text. But a primary language with C-style *block comments*
+    (``/** ... */``) swallows the markers inside comment regions -
+    listings stops processing delimiters once a block comment opens.
+    The reference pipeline strips ``language=C++`` for exactly this
+    reason; keyword colouring is a visual nicety, marker visibility
+    is the point of a diff document.
+    """
+    import re
+
+    return re.sub(r"(\\lstset\{)language=[A-Za-z0-9+#]*,", r"\1", marked_up)
 
 
 def _inject_preamble(marked_up: str, source: str) -> str:

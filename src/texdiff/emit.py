@@ -17,8 +17,9 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from .align import Delete, Edit, Insert, Match, Modify
-from .nodes import Node
+from .nodes import Node, _SECTIONING_RE
 from .parse import VERBATIM_ENVIRONMENTS
+from . import oldlines
 from . import tables
 from .tables import RETIRE_MIN_ROWS
 
@@ -235,6 +236,93 @@ def _merge_nodes(nodes: list[Node]) -> Node:
     return Node(kind=kind, text="".join(n.text for n in nodes), atom=True)
 
 
+def _mark_heading_arg(text: str) -> str:
+    """Reinforce a sectioning heading: ``\\DIFadd`` inside the title.
+
+    Block markers colour the typeset heading text, but the table of
+    contents entry is written at ``\\subsection`` expansion time from
+    the *argument* - a colour declaration outside the braces never
+    reaches the .toc file. Wrapping the argument content in
+    ``\\DIFadd{...}`` (as the reference build does) carries the markup
+    into the TOC line as well.
+
+    Applied only when the title is inline-safe (no macro-with-arg,
+    no nested environments): anything fancier falls back to the plain
+    block colouring, which still colours the body text.
+    """
+    m = _SECTIONING_RE.match(text)
+    if not m:
+        return text
+    body = text[m.end() - 1 :]  # from the opening brace
+    depth = 0
+    end = -1
+    for i, ch in enumerate(body):
+        if ch == "{" and (i == 0 or body[i - 1] != "\\"):
+            depth += 1
+        elif ch == "}" and (i == 0 or body[i - 1] != "\\"):
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end < 1:
+        return text
+    title = body[1:end]
+    if not _is_safe_inline(title) or not title.strip():
+        return text
+    return (
+        text[: m.end() - 1]
+        + "{\\DIFadd{"
+        + title
+        + "}}"
+        + body[end + 1 :]
+    )
+
+
+def _mark_heading_args_in_run(text: str) -> str:
+    """Mark sectioning headings inside a coalesced insert run.
+
+    Long insert runs are merged into one synthetic text node, so the
+    per-macro heading marking never sees them. Large added regions are
+    still block-coloured overall; the only visible gap is the TOC,
+    which takes its content from the heading argument. This helper
+    walks the run line-wise and applies :func:`_mark_heading_arg` to
+    every line that is exactly one sectioning macro call.
+    """
+    if _SECTIONING_RE.search(text) is None:
+        return text
+    out = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        head_call = _find_heading_span(stripped) if _SECTIONING_RE.match(stripped) else None
+        if head_call:
+            pos = line.find(head_call)
+            out.append(
+                line[:pos]
+                + _mark_heading_arg(head_call)
+                + line[pos + len(head_call) :]
+            )
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _find_heading_span(text: str) -> str:
+    """Return the first sectioning macro call substring of `text`."""
+    m = _SECTIONING_RE.search(text)
+    start = m.start()
+    depth = 0
+    i = m.end() - 1  # at the opening brace
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        i += 1
+    return text[start:]
+
+
 def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
     """Wrap one node with inline or block markup as appropriate.
 
@@ -258,10 +346,12 @@ def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
         return _wrap_row(node, markup, added)
     if _needs_block(node):
         if added:
-            return f"{markup.block_add_open}{node.text}{markup.block_add_close}"
+            body = _mark_heading_args_in_run(node.text)
+            return f"{markup.block_add_open}{body}{markup.block_add_close}"
         return f"{markup.block_del_open}{node.text}{markup.block_del_close}"
     if added:
-        return _wrap(node.text, markup.add_open, markup.add_close)
+        body = _mark_heading_args_in_run(node.text)
+        return _wrap(body, markup.add_open, markup.add_close)
     return _wrap(node.text, markup.del_open, markup.del_close)
 
 
@@ -393,18 +483,27 @@ _STRUCT_LINE_RE = re.compile(r"^\s*\\(?:hline|endhead|endfoot|rowcolor|caption)\
 
 
 def _color_lines(text: str) -> str:
-    """Colour each content line blue (degraded add markup).
+    """Colour added lines blue, existing ones black (refine-diff).
 
     A colour declaration is legal at the start of a table cell but
     dies at the cell boundary, so it must be re-started after each
     ``&`` on the same line (refine-diff convention); structure-only
-    lines (``\\\\hline`` ...) stay untouched.
+    lines (``\\hline`` ...) stay untouched.
+
+    A line whose normalised content already existed in the OLD
+    revision is re-emitted content, not a genuine addition: it takes
+    ``\\color{black}`` so unstated-content stays visually unchanged
+    (refine-diff.pl semantics).
     """
+    from . import oldlines
+
     out: list[str] = []
     for line in text.split("\n"):
         if line.strip() and not _STRUCT_LINE_RE.match(line):
-            line = f"\\color{{blue}} {line}"
-            line = re.sub(r"(?<!\\)&", r"& \\color{blue} ", line)
+            color = "blue" if not oldlines.in_old(line) else "black"
+            line = f"\\color{{{color}}} {line}"
+            if color == "blue":
+                line = re.sub(r"(?<!\\)&", r"& \\color{blue} ", line)
         out.append(line)
     return "\n".join(out)
 
@@ -482,9 +581,11 @@ def _render_verbatim_modify(edit: Modify) -> str | None:
         else:
             changed = True
             for line in old_lines[i1:i2]:
-                out.append(_DIF_DEL_MARK + line if line.strip() else _DIF_DEL_MARK.rstrip())
+                if line.strip():
+                    out.append(_DIF_DEL_MARK + line)
             for line in new_lines[j1:j2]:
-                out.append(_DIF_ADD_MARK + line if line.strip() else _DIF_ADD_MARK.rstrip())
+                if line.strip():
+                    out.append(_DIF_ADD_MARK + line)
     if not changed:
         return edit.new.text
 
@@ -592,7 +693,195 @@ def _render_recursed(edit: Modify, markup: LatexdiffMarkup) -> str:
             edit.new.text, markup.add_open, markup.add_close
         )
     prefix, suffix = wrapped
-    return prefix + render(edit.inner or [], markup) + suffix
+    return prefix + _render_row_region(edit.inner or [], markup) + suffix
+
+
+def _render_row_region(edits: list[Edit], markup: LatexdiffMarkup) -> str:
+    """Render an inner edit list, merging Delete/Insert row pairs.
+
+    A changed longtable row normally renders as a deleted row region
+    followed by a re-added one. For rows made of multi-line makecell
+    cells that layout visibly breaks the table: the deleted region's
+    commented-out lines leave the row-end ``\\`` dangling, and the
+    re-added row duplicates the row (and its struck cells jam a ghost
+    row with double the column count into the grid).
+
+    The reference build instead emits ONE row: common cell lines kept
+    (``\\color{black}``), genuinely new lines blue, old-only lines
+    ``%DIFDELCMD`` inside a ``\\DIFdelbegin...\\DIFdelend`` span just
+    before the new span. :func:`_merge_row_text` produces that
+    layout; anything but a qualifying row pair takes the normal
+    :func:`render` path.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(edits):
+        e = edits[i]
+        if (
+            i + 1 < len(edits)
+            and isinstance(e, Delete)
+            and isinstance(edits[i + 1], Insert)
+            and e.old.kind == "row"
+            and edits[i + 1].new.kind == "row"
+            and _row_pair_matches(e.old.text, edits[i + 1].new.text)
+        ):
+            merged, consumed = _merge_row_pair(
+                edits[i], edits[i + 1], i, edits
+            )
+            out.append(merged)
+            i += consumed
+            continue
+        # single edit: normal render path, but recurse for inner lists
+        if isinstance(e, Modify) and e.inner is not None:
+            out.append(_render_recursed(e, markup))
+        elif isinstance(e, Match):
+            out.append(e.node.text)
+        elif isinstance(e, Insert):
+            out.append(_wrap_node(e.new, markup, added=True))
+        elif isinstance(e, Delete):
+            out.append(_wrap_node(e.old, markup, added=False))
+        i += 1
+    return "".join(out)
+
+
+def _row_pair_matches(old_row: str, new_row: str) -> bool:
+    """Do a deleted/inserted row pair look like the same logical row?"""
+    old_lines = {l for l in (oldlines.norm_line(x) for x in old_row.split("\n")) if l}
+    new_lines = {l for l in (oldlines.norm_line(x) for x in new_row.split("\n")) if l}
+    if not old_lines or not new_lines:
+        return False
+    shared = old_lines & new_lines
+    return len(shared) >= max(len(old_lines), len(new_lines)) * _ROW_MERGE_SIMILARITY
+
+
+_ROW_MERGE_SIMILARITY = 0.35  # shared-line fraction below which pairs stay separate
+
+
+def _merge_row_pair(
+    delete: Delete, insert: Insert, idx: int, edits: list[Edit]
+) -> tuple[str, int]:
+    """Render a deleted+inserted row pair as one merged row (reference form)."""
+    from .textdiff import word_diff
+    from difflib import SequenceMatcher
+
+    old_row, new_row = delete.old.text, insert.new.text
+    old_lines = old_row.split("\n")
+    new_lines = new_row.split("\n")
+    new_norms = {oldlines.norm_line(x) for x in new_lines}
+
+    out: list[str] = []
+    # leading structure lines of the old row (\hline) stay visible
+    first_content = next(
+        (l for l in old_lines if l.strip() and not _STRUCT_LINE_RE.match(l)),
+        None,
+    )
+    lead = old_row[: old_row.find(first_content)] if first_content else ""
+    out.append(lead)
+
+    # old-only content lines: commented out inside \DIFdelbegin...\DIFdelend;
+    # lines also present in the new row are re-emitted (colour-marked) below.
+    # A similar old/new line *pair* (one-char fix, small rewording) is
+    # instead emitted once with word-level DIFdel/DIFadd marks - the
+    # reference treatment of the "Inpu[p]t product files" typo fix.
+    del_only = [
+        l
+        for l in old_lines
+        if l.strip()
+        and not _STRUCT_LINE_RE.match(l)
+        and oldlines.norm_line(l) not in new_norms
+    ]
+    add_only = [
+        l
+        for l in new_lines
+        if l.strip()
+        and not _STRUCT_LINE_RE.match(l)
+        and oldlines.norm_line(l) not in {oldlines.norm_line(x) for x in old_lines}
+    ]
+    pair_map: dict[int, str] = {}  # index in del_only -> rendered replacement
+    new_pair_map: dict[int, str] = {}  # index in add_only -> rendered replacement
+    used_new: set[int] = set()
+    for oi, ol in enumerate(del_only):
+        best_j, best_ratio = -1, 0.0
+        for aj, al in enumerate(add_only):
+            if aj in used_new:
+                continue
+            ratio = SequenceMatcher(
+                None, oldlines.norm_line(ol), oldlines.norm_line(al)
+            ).ratio()
+            if ratio > best_ratio:
+                best_ratio, best_j = ratio, aj
+        if best_j >= 0 and best_ratio >= 0.80:
+            rendering = _word_marked_line(ol, add_only[best_j])
+            if rendering:
+                pair_map[oi] = rendering
+                new_pair_map[best_j] = rendering
+                used_new.add(best_j)
+    replaced = set(pair_map)
+    rendered_added = set(new_pair_map)
+
+    if any(oi not in replaced for oi in range(len(del_only))):
+        out.append("\\DIFdelbeginFL\n")
+        for oi, l in enumerate(del_only):
+            if oi not in replaced:
+                out.append(f"%DIFDELCMD < {l} \\%%\n")
+        out.append("\\DIFdelendFL\n")
+
+    out.append("\\DIFaddbeginFL\n")
+    ai = 0
+    for line in new_lines:
+        s = line.strip()
+        if not s:
+            out.append(line)
+            continue
+        # position of this line within add_only (if it is one)
+        is_add_only = ai if (ai < len(add_only) and line == add_only[ai]) else None
+        if is_add_only is not None:
+            if is_add_only in rendered_added:
+                # word-level pair: emit the marked pair line instead
+                out.append(new_pair_map[is_add_only])
+            elif oldlines.in_old(line):
+                out.append(re.sub(r"^(\s*)(\S.*)$", r"\1\\color{black} \2", line))
+            else:
+                out.append(re.sub(r"^(\s*)(\S.*)$", r"\1\\color{blue} \2", line))
+            ai += 1
+        elif _STRUCT_LINE_RE.match(line):
+            out.append(" " + s if not line[:1].isspace() else line)
+        elif oldlines.in_old(line):
+            out.append(re.sub(r"^(\s*)(\S.*)$", r"\1\\color{black} \2", line))
+        else:
+            out.append(re.sub(r"^(\s*)(\S.*)$", r"\1\\color{blue} \2", line))
+    out.append("\\DIFaddendFL\n")
+    return "".join(out), 2
+
+
+def _norm_core(s: str) -> str:
+    """Minimal normalisation for contained-in checks of marked lines."""
+    return re.sub(r"\\DIF(?:add|del)?(?:begin|end)?(?:FL)?|\\color\{(?:black|blue)\}|\s+", "", s)
+
+
+def _word_marked_line(old_line: str, new_line: str) -> str:
+    """One line carrying word-level DIFdel/DIFadd marks.
+
+    Only for lines whose content is inline-safe on both sides (no
+    ``&`` cell separators with unsafe runs, no macros-with-args in the
+    changed region) - the wrap would otherwise break the row.
+    """
+    from .textdiff import (DELETE, INSERT, Chunk, word_diff)
+
+    chunks = word_diff(old_line, new_line)
+    parts: list[str] = []
+    for c in chunks:
+        if c.op == "equal":
+            parts.append(c.text)
+        elif c.op == "delete":
+            if not _is_safe_inline(c.text):
+                return ""
+            parts.append(f"\\DIFdelbegin \\DIFdel{{{c.text}}}\\DIFdelend ")
+        else:
+            if not _is_safe_inline(c.text):
+                return ""
+            parts.append(f"\\DIFadd{{{c.text}}}")
+    return "".join(parts)
 
 
 def _wrappers(node: Node) -> tuple[str, str] | None:
