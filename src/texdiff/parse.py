@@ -32,7 +32,12 @@ from pylatexenc.latexwalker import (
     LatexWalker,
     get_default_latex_context_db,
 )
-from pylatexenc.macrospec import EnvironmentSpec, VerbatimArgsParser
+from pylatexenc.macrospec import (
+    EnvironmentSpec,
+    MacroStandardArgsParser,
+    ParsedMacroArgs,
+    ParsedVerbatimArgs,
+)
 
 from .nodes import Node
 
@@ -74,6 +79,46 @@ TABLE_ENVIRONMENTS = frozenset(
 )
 
 
+class _NamedVerbatimArgsParser(MacroStandardArgsParser):
+    """Verbatim args parser for named environments.
+
+    pylatexenc's :class:`VerbatimArgsParser` hardcodes the terminator
+    ``\\end{verbatim}`` — registering ``lstlisting`` (or any other
+    named verbatim environment) with it makes the walker swallow
+    everything up to a *literal* ``\\end{verbatim}`` far later in the
+    document, merging dozens of unrelated listings and the prose
+    between them into one giant node. This subclass scans for the
+    environment's own ``\\end{<envname>}``, exactly as LaTeX does.
+    """
+
+    def __init__(self, envname: str, **kwargs):
+        super().__init__(argspec="{", **kwargs)
+        self.envname = envname
+
+    def parse_args(self, w, pos, parsing_state=None):
+        from pylatexenc import latexwalker
+
+        endtoken = f"\\end{{{self.envname}}}"
+        endpos = w.s.find(endtoken, pos)
+        if endpos == -1:
+            raise latexwalker.LatexWalkerParseError(
+                s=w.s,
+                pos=pos,
+                msg=f"Cannot find matching {endtoken}",
+            )
+        len_ = endpos - pos
+        argd = ParsedVerbatimArgs(
+            verbatim_chars_node=w.make_node(
+                latexwalker.LatexCharsNode,
+                parsing_state=parsing_state,
+                chars=w.s[pos : pos + len_],
+                pos=pos,
+                len=len_,
+            )
+        )
+        return (argd, pos, len_)
+
+
 def _latex_context():
     """Default pylatexenc context extended with verbatim environments.
 
@@ -83,7 +128,7 @@ def _latex_context():
     unbalanced braces (C++ ``std::tuple<int, ...>`` constructors,
     ``#include <x>`` in ``alltt``...) make strict parsing fail and
     tolerant parsing produce garbage error nodes. Registering them
-    with :class:`VerbatimArgsParser` makes the walker read their
+    with a named verbatim args parser makes the walker read their
     bodies verbatim, exactly as LaTeX does.
     """
     db = get_default_latex_context_db()
@@ -93,7 +138,7 @@ def _latex_context():
         environments=[
             EnvironmentSpec(
                 envname,
-                args_parser=VerbatimArgsParser(verbatim_arg_type="verbatim-environment"),
+                args_parser=_NamedVerbatimArgsParser(envname),
             )
             for envname in VERBATIM_ENVIRONMENTS
         ],

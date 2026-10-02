@@ -22,7 +22,7 @@ from .nodes import Node
 
 @dataclass(frozen=True)
 class LatexdiffMarkup:
-    """latexdiff UNDERLINE-type markup (blue wavy underline / red strike).
+    """latexdiff-underline-style markup (blue wavy underline / red strike).
 
     Two markup forms exist, mirroring latexdiff's own distinction:
 
@@ -30,21 +30,32 @@ class LatexdiffMarkup:
       strike-through; LR-mode only, must not contain block structure;
     * *block* (``\\DIFaddbegin ... \\DIFaddend``) around whole
       nodes whose content cannot live inside a macro argument
-      (environments, tables, multi-line runs). Block markers are
-      NO-OP macros (like latexdiff's ``FL`` float variants): a colour
-      group between ``\\\\`` and ``\\hline`` provokes
-      ``Misplaced \\noalign`` in tables, so block regions carry no
-      visible styling by themselves.
+      (environments, tables, multi-line runs). Block markers switch
+      the active colour declaration-style (no group!): a *colour
+      group* between ``\\\\`` and ``\\hline`` provokes
+      ``Misplaced \\noalign`` in tables, but a plain declaration
+      (``\\color{blue}``) is legal there - LaTeX keeps it in force
+      until the next ``\\DIFdelbegin``/group boundary.
     """
 
     add_open: str = "\\DIFadd{"
     add_close: str = "}"
     del_open: str = "\\DIFdel{"
     del_close: str = "}"
+    # declarations, not groups: visible outside tables
     block_add_open: str = "\\DIFaddbegin\n"
     block_add_close: str = "\\DIFaddend\n"
     block_del_open: str = "\\DIFdelbegin\n"
     block_del_close: str = "\\DIFdelend\n"
+    # row-region block markers: no-op, like latexdiff's *FL variants.
+    # Anything expandable after \\ starts the next table cell and
+    # provokes "Misplaced \noalign" before a following \hline (a
+    # colour declaration included); rows stay visible through the
+    # per-cell inline markup instead.
+    row_block_add_open: str = "\\DIFaddbeginFL\n"
+    row_block_add_close: str = "\\DIFaddendFL\n"
+    row_block_del_open: str = "\\DIFdelbeginFL\n"
+    row_block_del_close: str = "\\DIFdelendFL\n"
 
 
 def render(edits: list[Edit], markup: LatexdiffMarkup = LatexdiffMarkup()) -> str:
@@ -121,8 +132,22 @@ def _coalesce(edits: list[Edit]) -> Iterator[Edit]:
 
 
 def _merge_nodes(nodes: list[Node]) -> Node:
-    """Concatenate nodes into one synthetic text node."""
-    return Node(kind="text", text="".join(n.text for n in nodes), atom=True)
+    """Concatenate nodes into one synthetic node.
+
+    A run made only of row nodes (plus pure-whitespace glue between
+    them) stays ``kind="row"``: it is then marked up by
+    :func:`_wrap_row`, which keeps ``&``/``\\\\``/``\\hline`` outside
+    the inline markup and uses the table-safe no-op block markers.
+    Losing that identity (as in earlier versions, which produced a
+    plain text node) sent whole-row insertions through the generic
+    block path with expandable markers glued after ``\\\\`` — a
+    recipe for ``Misplaced \\noalign``.
+    """
+    all_rows_or_space = all(
+        n.kind == "row" or (n.kind == "text" and not n.text.strip()) for n in nodes
+    )
+    kind = "row" if (all_rows_or_space and any(n.kind == "row" for n in nodes)) else "text"
+    return Node(kind=kind, text="".join(n.text for n in nodes), atom=True)
 
 
 def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
@@ -147,7 +172,13 @@ def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
     return _wrap(node.text, markup.del_open, markup.del_close)
 
 
-_ROW_SPLIT_RE = re.compile(r"(&|\\\\|\\hline|\\end(?:firsthead|head|foot|lastfoot)|\\end\{[a-zA-Z*]+\})")
+# split a row region into structural tokens and text runs. `(?<!\\)&`
+# so an escaped literal ampersand (``\&`` in cell text) is NOT a
+# cell separator; ``\begin{...}`` is structural alongside ``\end`` so
+# nested environments in cells are never inline-wrapped.
+_ROW_SPLIT_RE = re.compile(
+    r"((?<!\\)&|\\\\|\\hline|\\begin\{[a-zA-Z*]+\}|\\end(?:firsthead|head|foot|lastfoot)|\\end\{[a-zA-Z*]+\})"
+)
 
 
 def _wrap_row(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
@@ -163,20 +194,50 @@ def _wrap_row(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
         markup.del_open,
         markup.del_close,
     )
-    b_open = markup.block_add_open if added else markup.block_del_open
-    b_close = markup.block_add_close if added else markup.block_del_close
+    b_open = markup.row_block_add_open if added else markup.row_block_del_open
+    b_close = markup.row_block_add_close if added else markup.row_block_del_close
 
     parts = _ROW_SPLIT_RE.split(node.text)
     marked: list[str] = []
     for part in parts:
         if part and _ROW_SPLIT_RE.fullmatch(part):
             marked.append(part)  # structural token: verbatim
-        elif part and part.strip():
+        elif part and part.strip() and _is_safe_inline(part):
             marked.append(_wrap(part, open_, close))
         else:
-            marked.append(part)  # whitespace
+            # whitespace, or run still too structured for \uwave/\sout:
+            # stays inside the region's colour, no inline wrap
+            marked.append(part)
     body = "".join(marked)
     return f"{b_open}{body}{b_close}"
+
+
+def _is_safe_inline(text: str) -> bool:
+    """True when a text run can live inside \\DIFadd{...}/\\DIFdel{...}.
+
+    Inline markup expands to ``\\uwave``/``\\sout`` (LR mode): the run
+    must be single-line, contain no environment boundaries and no
+    macro-with-argument. Used by both the regular node wrap and the
+    per-cell wraps inside table row regions - a multi-line run inside
+    a color-declaration block keeps the region colour instead, which
+    is exactly latexdiff's degraded-mode behaviour.
+    """
+    if "\\begin" in text or "\\end" in text:
+        return False
+    if "\n" in text:
+        return False
+    if _ARG_MACRO_RE.search(text):
+        return False
+    if _LIST_ITEM_RE.search(text):
+        # \item / \par inside a strikeout/wave is LR-mode illegal
+        # ("Lonely \item") - cells with nested lists keep the region
+        # colour instead of inline markup
+        return False
+    return True
+
+
+# list/paragraph primitives that cannot appear inside \uwave/\sout
+_LIST_ITEM_RE = re.compile(r"\\(?:item|par|newline|linebreak|cr)\b")
 
 
 def _needs_block(node: Node) -> bool:
@@ -192,12 +253,7 @@ def _needs_block(node: Node) -> bool:
     """
     if node.kind in {"macro", "env"}:
         return True
-    text = node.text
-    if "\n" in text:
-        return True
-    if _ARG_MACRO_RE.search(text):
-        return True
-    return "\\begin" in text or "\\end" in text
+    return not _is_safe_inline(node.text)
 
 
 # a control sequence directly followed by an argument brace: wrapping
@@ -267,10 +323,16 @@ PREAMBLE_TEMPLATE = """\
 \\RequirePackage{color} %DIF PREAMBLE
 \\providecommand{\\DIFadd}[1]{{\\protect\\color{blue}\\uwave{{#1}}}} %DIF PREAMBLE
 \\providecommand{\\DIFdel}[1]{{\\protect\\color{red}\\sout{{#1}}}} %DIF PREAMBLE
-%DIF block markers: no-op (colour groups break \\hline in tables)
-\\providecommand{\\DIFaddbegin}{} %DIF PREAMBLE
-\\providecommand{\\DIFaddend}{} %DIF PREAMBLE
-\\providecommand{\\DIFdelbegin}{} %DIF PREAMBLE
-\\providecommand{\\DIFdelend}{} %DIF PREAMBLE
+%DIF block markers: colour declarations (visible outside tables)
+\providecommand{\DIFaddbegin}{\color{blue}} %DIF PREAMBLE
+\providecommand{\DIFaddend}{\color{black}} %DIF PREAMBLE
+\providecommand{\DIFdelbegin}{\color{red}} %DIF PREAMBLE
+\providecommand{\DIFdelend}{\color{black}} %DIF PREAMBLE
+%DIF row-region markers: no-op (latexdiff FL style); per-cell inline
+%DIF markup carries the visibility inside table rows
+\providecommand{\DIFaddbeginFL}{} %DIF PREAMBLE
+\providecommand{\DIFaddendFL}{} %DIF PREAMBLE
+\providecommand{\DIFdelbeginFL}{} %DIF PREAMBLE
+\providecommand{\DIFdelendFL}{} %DIF PREAMBLE
 %DIF END PREAMBLE EXTENSION ADDED BY texdiff
 """
