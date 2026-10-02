@@ -30,7 +30,9 @@ from pylatexenc.latexwalker import (
     LatexMathNode,
     LatexSpecialsNode,
     LatexWalker,
+    get_default_latex_context_db,
 )
+from pylatexenc.macrospec import EnvironmentSpec, VerbatimArgsParser
 
 from .nodes import Node
 
@@ -72,6 +74,38 @@ TABLE_ENVIRONMENTS = frozenset(
 )
 
 
+def _latex_context():
+    """Default pylatexenc context extended with verbatim environments.
+
+    pylatexenc's default specs only know ``verbatim`` as a verbatim
+    environment; ``lstlisting``, ``minted``, ``alltt`` and friends are
+    parsed as *regular* environments, so code listings containing
+    unbalanced braces (C++ ``std::tuple<int, ...>`` constructors,
+    ``#include <x>`` in ``alltt``...) make strict parsing fail and
+    tolerant parsing produce garbage error nodes. Registering them
+    with :class:`VerbatimArgsParser` makes the walker read their
+    bodies verbatim, exactly as LaTeX does.
+    """
+    db = get_default_latex_context_db()
+    db.add_context_category(
+        "texdiff-verbatim",
+        macros=[],
+        environments=[
+            EnvironmentSpec(
+                envname,
+                args_parser=VerbatimArgsParser(verbatim_arg_type="verbatim-environment"),
+            )
+            for envname in VERBATIM_ENVIRONMENTS
+        ],
+        specials=[],
+        prepend=True,
+    )
+    return db
+
+
+_LATEX_CONTEXT = _latex_context()
+
+
 class ParseError(ValueError):
     """Raised when LaTeX source cannot be parsed even tolerantly."""
 
@@ -100,13 +134,15 @@ def parse(source: str) -> list[Node]:
     """
     nodes: list[Node]
     try:
-        nodelist, _pos, _len = LatexWalker(source, tolerant_parsing=False).get_latex_nodes()
+        nodelist, _pos, _len = LatexWalker(
+            source, latex_context=_LATEX_CONTEXT, tolerant_parsing=False
+        ).get_latex_nodes()
         converted = [_convert(n, source) for n in nodelist]
     except Exception:
         # strict mode failed: real-world construct or genuinely broken?
         try:
             nodelist, _pos, length = LatexWalker(
-                source, tolerant_parsing=True
+                source, latex_context=_LATEX_CONTEXT, tolerant_parsing=True
             ).get_latex_nodes()
         except Exception as exc:
             raise ParseError(f"cannot parse LaTeX source: {exc}") from exc

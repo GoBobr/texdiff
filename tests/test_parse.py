@@ -32,6 +32,30 @@ class TestRoundTrip:
         src = "\\begin{verbatim}wysiwyg %DIF> \\raw\\end{verbatim}\n"
         assert "".join(n.text for n in parse(src)) == src
 
+    def test_lstlisting_with_unbalanced_braces(self):
+        # pylatexenc's default specs don't know lstlisting as a
+        # verbatim environment; C++ code inside listings (template
+        # commas, angle brackets) broke strict parsing. We register
+        # the verbatim environments in the latex context ourselves.
+        src = (
+            "\\begin{lstlisting}\n"
+            "std::tuple<int,\n"
+            "           std::shared_ptr<Product> >\n"
+            "f(const Config& c, const Job& j);\n"
+            "\\end{lstlisting}\n"
+        )
+        nodes = parse(src)
+        assert "".join(n.text for n in nodes) == src
+        vb = next(n for n in nodes if n.kind == "env")
+        assert vb.name == "lstlisting"
+        assert vb.atom is True
+        assert vb.children == []
+
+    def test_minted_verbatim_body(self):
+        src = "\\begin{minted}{python}\nx = {'a': 1}\n\\end{minted}\n"
+        nodes = parse(src)
+        assert "".join(n.text for n in nodes) == src
+
     def test_comment_round_trips(self):
         src = "text % a comment\nmore\n"
         assert "".join(n.text for n in parse(src)) == src
