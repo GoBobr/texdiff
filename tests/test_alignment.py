@@ -413,3 +413,112 @@ def test_reindentation_of_listing_not_marked() -> None:
     body = out.split("\\begin{document}", 1)[1]
     assert "%DIF <" not in body
     assert "%DIF >" not in body
+
+
+# --- duplicate member moved into new struct: no silent cancellation ------------
+
+
+def test_duplicated_member_moved_into_new_struct_shows_both_sides() -> None:
+    # a member dropped from a struct whose tail survives as context
+    # and re-hosted by a NEW struct type (BandQuality-like) must show
+    # the red removal AND the blue re-add: the old lines sit in a
+    # replace region (they already have new-side partners there), so
+    # the moved-block cancellation must not swallow them
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\n"
+        "struct Positioned {\n"
+        "double duration_of_product;\n"
+        "double duration_of_data_present;\n"
+        "double duration_of_data_missing;\n"
+        "double duration_of_data_degraded;\n"
+        "garray<double> gap_start_time_utc;\n"
+        "garray<double> gap_end_time_utc;\n"
+        "};\n"
+        "Other tail context line.\n"
+        "\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\n"
+        "struct BandWrapper {\n"
+        "garray<double> gap_start_time_utc;\n"
+        "garray<double> gap_end_time_utc;\n"
+        "};\n"
+        "struct Positioned {\n"
+        "uint16_t flag_one;\n"
+        "int16_t flag_two_a;\n"
+        "int16_t flag_two_b;\n"
+        "double duration_of_product;\n"
+        "double duration_of_data_present;\n"
+        "double duration_of_data_missing;\n"
+        "double duration_of_data_degraded;\n"
+        "BandWrapper wrap_a;\n"
+        "BandWrapper wrap_b;\n"
+        "};\n"
+        "Other tail context line.\n"
+        "\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    body = out.split("\\begin{document}", 1)[1]
+    # the removal stays visible (red strike at the old position)
+    assert "%DIF < garray<double> gap_start_time_utc;" in body
+    assert "%DIF < garray<double> gap_end_time_utc;" in body
+    # the re-add stays visible (blue at the new position)
+    assert "%DIF > struct BandWrapper {" in body
+    assert "%DIF > garray<double> gap_start_time_utc;" in body
+    assert "%DIF > garray<double> gap_end_time_utc;" in body
+    # the struct tail survives as unmarked context
+    assert "\ndouble duration_of_product;\n" in body
+    assert "%DIF > garray<double> gap_start_time_utc;" in body
+    assert "%DIF > garray<double> gap_end_time_utc;" in body
+
+
+# --- wholesale paragraph replacement when wording diverges --------------------
+
+
+def test_rewritten_paragraph_retired_and_readded_wholesale() -> None:
+    # two sentences sharing almost no words: interleaving word marks
+    # reads as word salad, so the paragraph retires and re-adds
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Depending on build type, output shape may differ, "
+        "including extra hints on origin location.\n\n"
+        "Logging functions are defined like this:\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "The logging macros are defined uniformly for every build: "
+        "origin location is always captured.\n\n"
+        "Logging macros are defined like this:\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    # rewritten first paragraph retires wholesale: one whole-sentence
+    # delete and one whole-sentence add
+    assert "\\DIFdel{Depending on build type," in out
+    assert "\\DIFadd{The logging macros are defined uniformly" in out
+    # the lightly-reworded second paragraph stays word-level
+    assert "\\DIFdel{functions}\\DIFadd{macros}" in out
+
+
+def test_rewritten_single_paragraph_run_also_retires() -> None:
+    # single-paragraph run (no sentinel paragraph after it): the
+    # whole-run fallback still retires dissimilar pairs
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "alpha beta gamma delta epsilon zeta\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "one two three four five six seven\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    assert "alpha beta" not in out or "\\DIFdel{" in out
+    assert "\\DIFdel{alpha beta gamma delta epsilon zeta}" in out
+    assert "\\DIFadd{one two three four five six seven}" in out

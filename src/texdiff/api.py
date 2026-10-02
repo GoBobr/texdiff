@@ -12,9 +12,15 @@ Three functions make up the pipeline::
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .align import Delete, Edit, Insert, Match, Modify, align
+
+# word-similarity floor below which a paired text run is retired and
+# re-added wholesale instead of word-marked: two sentences sharing
+# less than half their words are a rewrite, not an edit
+_REPLACE_WORD_SIMILARITY = 0.5
 from .emit import LatexdiffMarkup, render
 from .flatten import Flattener, flatten_file, flatten_source
 from .nodes import Node, text_node
@@ -209,12 +215,89 @@ def _diff_nodes(old: list[Node], new: list[Node]) -> list[Edit]:
             and edit.old.kind == "text"
             and edit.new.kind == "text"
         ):
-            # word-level refinement of a changed text run
-            chunks = word_diff(edit.old.text, edit.new.text)
-            result.extend(_chunks_to_edits(chunks))
+            # heavily rewritten paragraphs: interleaving word marks
+            # between two sentences sharing less than half their words
+            # reads as word salad. Such paragraphs retire wholesale -
+            # delete + re-add, the track-changes convention - while
+            # well-matched paragraphs of the same run keep their
+            # word-level treatment.
+            para_edits = _paragraph_edits(edit.old.text, edit.new.text)
+            if para_edits is None:
+                result.append(edit)
+            else:
+                result.extend(para_edits)
         else:
             result.append(edit)
     return result
+
+
+def _run_similarity(a: str, b: str) -> float:
+    """Word-level similarity of two text runs, in ``[0, 1]``.
+
+    Tokens are compared with edge punctuation stripped, so
+    ``text.`` matches ``text`` - the word differ itself works at
+    that granularity and the retire/re-add decision must agree
+    with it, or trivially reworded sentences (``Body text.`` to
+    ``Body text changed.``) would look like rewrites.
+    """
+    from difflib import SequenceMatcher
+
+    wa = [w for w in (t.strip(".,;:!?()\"'`") for t in a.split()) if w]
+    wb = [w for w in (t.strip(".,;:!?()\"'`") for t in b.split()) if w]
+    if not wa or not wb:
+        return 0.0
+    return SequenceMatcher(a=wa, b=wb, autojunk=False).ratio()
+
+
+def _paragraph_edits(old: str, new: str) -> list[Edit] | None:
+    """Word-refine a text run paragraph by paragraph.
+
+    A text run spans everything up to the next macro/environment -
+    often several paragraphs. Blank-line-separated paragraphs pair
+    positionally; each pair either takes the word-level diff or, when
+    the two paragraphs share less than half their words, the
+    whole-paragraph delete + re-add. Whitespace around and between
+    paragraphs keeps the NEW bytes - separator differences are
+    invisible and must not produce marks.
+
+    Returns ``None`` when paragraph counts do not match or the run
+    is a wholesale rewrite: the caller then keeps the block-level
+    ``Modify`` (whole-run retire + re-add).
+    """
+
+    def split_run(s: str) -> tuple[str, list[str], str]:
+        lead = s[: len(s) - len(s.lstrip())]
+        trail = s[len(s.rstrip()) :]
+        core = s[len(lead) : len(s) - len(trail)]
+        return lead, re.split(r"\n\s*\n", core), trail
+
+    lead_a, paras_a, trail_a = split_run(old)
+    lead_b, paras_b, trail_b = split_run(new)
+    if len(paras_a) != len(paras_b) or any(
+        not p.strip() for p in paras_a + paras_b
+    ):
+        # mismatched paragraph structure: whole-run judgement
+        return (
+            None
+            if _run_similarity(old, new) < _REPLACE_WORD_SIMILARITY
+            else _chunks_to_edits(word_diff(old, new))
+        )
+
+    def sep(text: str) -> Edit:
+        # paragraph separator, kept from the NEW side when it exists
+        return Match(node=text_node(text if text.strip() else "\n\n"))
+
+    out: list[Edit] = [sep(lead_b or lead_a)]
+    for k, (ca, cb) in enumerate(zip(paras_a, paras_b)):
+        if _run_similarity(ca, cb) < _REPLACE_WORD_SIMILARITY:
+            out.append(Delete(old=text_node(ca)))
+            out.append(Insert(new=text_node(cb)))
+        else:
+            out.extend(_chunks_to_edits(word_diff(ca, cb)))
+        if k + 1 < len(paras_a):
+            out.append(sep("\n\n"))
+    out.extend(_chunks_to_edits(word_diff(trail_a, trail_b)))
+    return out
 
 
 def _chunks_to_edits(chunks: list[Chunk]) -> list[Edit]:

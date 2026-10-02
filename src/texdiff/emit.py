@@ -629,6 +629,15 @@ def _render_verbatim_modify(edit: Modify) -> str | None:
     block emits once, unmarked, at its new position, instead of
     being retired and re-added wholesale (the "retired and
     reintroduced" look generic text diffs avoid by word matching).
+
+    Cancellation is only for old lines from *delete* regions: an old
+    line inside a replace region already has new-side partners there,
+    and when such lines are duplicated into a new structural context
+    (a member moved from one struct into a new band-level struct),
+    cancelling hides both the removal and the addition. The reviewer
+    must see the delete where it happened  and  the insert where the
+    copy now lives (latexdiff does the same there, while genuinely
+    re-sited blocks - old side deleted outright - still move quietly)
     """
     from difflib import SequenceMatcher
 
@@ -651,6 +660,9 @@ def _render_verbatim_modify(edit: Modify) -> str | None:
     # lines to catch moved blocks (see docstring)
     un_a = [i for op in ops if op[0] in ("delete", "replace") for i in range(op[1], op[2])]
     un_b = [j for op in ops if op[0] in ("insert", "replace") for j in range(op[3], op[4])]
+    old_region: dict[int, str] = {
+        i: op[0] for op in ops for i in range(op[1], op[2])
+    }
     cancels_a: set[int] = set()
     cancels_b: set[int] = set()
     if un_a and un_b:
@@ -660,9 +672,14 @@ def _render_verbatim_modify(edit: Modify) -> str | None:
             autojunk=False,
         )
         for blk in sm2.get_matching_blocks():
-            if blk.size:
-                cancels_a.update(un_a[blk.a + k] for k in range(blk.size))
-                cancels_b.update(un_b[blk.b + k] for k in range(blk.size))
+            for k in range(blk.size):
+                i = un_a[blk.a + k]
+                # only old lines with no primary new partner may be
+                # cancelled as moved (delete-region lines); replace-
+                # region old lines keep their visible strikeout
+                if old_region.get(i) == "delete":
+                    cancels_a.add(i)
+                    cancels_b.add(un_b[blk.b + k])
 
     out: list[str] = []
     changed = False
