@@ -19,7 +19,11 @@ from .emit import LatexdiffMarkup, render
 from .flatten import Flattener, flatten_file, flatten_source
 from .nodes import Node, text_node
 from .parse import parse
-from .preamble import count_preamble_changes, split_preamble
+from .preamble import (
+    count_preamble_changes,
+    mark_preamble_macro_changes,
+    split_preamble,
+)
 from .textdiff import DELETE, EQUAL, Chunk, word_diff
 
 
@@ -105,6 +109,11 @@ def diff_documents(
     body_markup = render(edits, markup)
     stats = _count(edits) + DiffStats(preamble_changes=preamble_changes)
     marked_up = pre_new + body_markup + post_new if pre_new else body_markup
+    if pre_new:
+        # change-record and other body-invoked preamble macros:
+        # their typeset content would otherwise silently swallow
+        # additions (preamble policy keeps the new revision as-is)
+        marked_up = mark_preamble_macro_changes(marked_up, old_source, new_source)
     if inject_preamble and stats.changed:
         marked_up = _inject_preamble(marked_up, new_source)
     return DiffResult(marked_up=marked_up, stats=stats, edits=edits)
