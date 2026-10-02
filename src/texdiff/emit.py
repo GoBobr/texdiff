@@ -337,6 +337,16 @@ def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
     double the document, and latexdiff's own COLORLISTINGS mode keeps
     deletions to the line-wise ``%DIF <`` markers inside *modified*
     listings only.
+
+    A large added block colouring does not reach into verbatim-like
+    environments: ``listings`` resets the current text colour at
+    ``\\begin{lstlisting}`` and applies its own ``basicstyle`` (and
+    ``commentstyle``/``morecomment`` on top), so an added YAML sample
+    inside a blue chapter comes out black with wildly-coloured
+    ``#``-comments. The reference build marks every line of such a
+    listing ``%DIF >`` inside a DIFcode ``alsolanguage`` environment -
+    the markers themselves typeset the whole line blue, including
+    comment lines.
     """
     if node.kind == "env" and node.name in VERBATIM_ENVIRONMENTS and not added:
         return _comment_out_env(node)
@@ -346,13 +356,58 @@ def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
         return _wrap_row(node, markup, added)
     if _needs_block(node):
         if added:
-            body = _mark_heading_args_in_run(node.text)
+            body = _mark_added_listings(node.text)
+            body = _mark_heading_args_in_run(body)
             return f"{markup.block_add_open}{body}{markup.block_add_close}"
         return f"{markup.block_del_open}{node.text}{markup.block_del_close}"
     if added:
         body = _mark_heading_args_in_run(node.text)
         return _wrap(body, markup.add_open, markup.add_close)
     return _wrap(node.text, markup.del_open, markup.del_close)
+
+
+# matches a whole verbatim-like environment span (begin..end) inside
+# a coalesced block run; non-greedy so consecutive environments match
+# separately. Only lstlisting-like envs with an optional [...] arg.
+_VERBATIM_SPAN_RE = re.compile(
+    r"\\begin\{(lstlisting|minted|alltt)\}"
+    r"(\[[^\]]*\])?"
+    r"\n(.*?)\\end\{\1\}",
+    re.S,
+)
+
+
+def _mark_added_listings(text: str) -> str:
+    """Line-mark verbatim environments inside an added block.
+
+    Every non-blank body line gets the ``%DIF >`` prefix and the
+    begin marker gains ``alsolanguage=DIFcode`` (when it does not
+    already), matching what a *modified* listing renders like - an
+    inserted chapter then typesets its listings blue line by line
+    instead of falling back to the listings language styles
+    (magenta ``#``-comments and friends stick out against a blue
+    chapter otherwise). Environments already carrying a ``%DIF``
+    marker line (a nested modify render that leaked into the run)
+    stay untouched.
+    """
+    if "\\begin{lstlisting" not in text and "minted" not in text and "alltt" not in text:
+        return text
+
+    def _mark(m: re.Match) -> str:
+        env, opts, body = m.group(1), m.group(2), m.group(3)
+        begin = f"\\begin{{{env}}}{opts or ''}"
+        begin = _add_alsolanguage(begin)
+        if _DIF_ADD_MARK in body or _DIF_DEL_MARK in body:
+            # already line-marked (nested modify markup): keep as-is
+            return m.group(0)
+        lines = [(_DIF_ADD_MARK + l if l.strip() else l) for l in body.split("\n")]
+        # a trailing marker-only line (empty last line) is dropped:
+        # listings would typeset a blank marker line at the env end
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return begin + "\n" + "\n".join(lines) + f"\\end{{{env}}}"
+
+    return _VERBATIM_SPAN_RE.sub(_mark, text)
 
 
 # split a row region into structural tokens and text runs. `(?<!\\)&`
@@ -562,6 +617,18 @@ def _render_verbatim_modify(edit: Modify) -> str | None:
     delimiters, extended with ``alsolanguage=DIFcode`` so the markers
     are interpreted (a plain verbatim env cannot host them: returned
     unchanged from ``_split_verbatim`` handling in the caller).
+
+    Lines compare on *stripped* text: re-indentation (a code block
+    moved one nesting level deeper) must not retire and re-add every
+    line of the block.
+
+    Moved blocks: a line group that exists in both revisions but at
+    different positions falls out of the primary alignment as a
+    delete run plus an insert run. A second match over the unmatched
+    lines of both sides finds those pairs and cancels them - the
+    block emits once, unmarked, at its new position, instead of
+    being retired and re-added wholesale (the "retired and
+    reintroduced" look generic text diffs avoid by word matching).
     """
     from difflib import SequenceMatcher
 
@@ -572,20 +639,51 @@ def _render_verbatim_modify(edit: Modify) -> str | None:
     _, old_lines, _ = old
     begin, new_lines, end = new
 
-    sm = SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    def key(line: str) -> str:
+        return line.strip()
+
+    sm = SequenceMatcher(
+        a=[key(l) for l in old_lines], b=[key(l) for l in new_lines], autojunk=False
+    )
+    ops = sm.get_opcodes()
+
+    # second pass: match unmatched old lines against unmatched new
+    # lines to catch moved blocks (see docstring)
+    un_a = [i for op in ops if op[0] in ("delete", "replace") for i in range(op[1], op[2])]
+    un_b = [j for op in ops if op[0] in ("insert", "replace") for j in range(op[3], op[4])]
+    cancels_a: set[int] = set()
+    cancels_b: set[int] = set()
+    if un_a and un_b:
+        sm2 = SequenceMatcher(
+            a=[key(old_lines[i]) for i in un_a],
+            b=[key(new_lines[j]) for j in un_b],
+            autojunk=False,
+        )
+        for blk in sm2.get_matching_blocks():
+            if blk.size:
+                cancels_a.update(un_a[blk.a + k] for k in range(blk.size))
+                cancels_b.update(un_b[blk.b + k] for k in range(blk.size))
+
     out: list[str] = []
     changed = False
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+    for tag, i1, i2, j1, j2 in ops:
         if tag == "equal":
             out.extend(new_lines[j1:j2])
-        else:
-            changed = True
-            for line in old_lines[i1:i2]:
-                if line.strip():
-                    out.append(_DIF_DEL_MARK + line)
-            for line in new_lines[j1:j2]:
-                if line.strip():
-                    out.append(_DIF_ADD_MARK + line)
+            continue
+        changed = True
+        # old-only lines of this region, minus the moved (cancelled)
+        for i in range(i1, i2):
+            if i in cancels_a or not old_lines[i].strip():
+                continue
+            out.append(_DIF_DEL_MARK + old_lines[i])
+        # new lines stay in new revision order; cancelled ones are
+        # moved context and emit unmarked at their new position
+        for j in range(j1, j2):
+            if not new_lines[j].strip():
+                continue
+            out.append(
+                new_lines[j] if j in cancels_b else _DIF_ADD_MARK + new_lines[j]
+            )
     if not changed:
         return edit.new.text
 

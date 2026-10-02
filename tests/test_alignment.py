@@ -255,3 +255,161 @@ def test_diff_documents_marks_added_heading_title() -> None:
 def test_wrap_wraps_text_in_markup_macros() -> None:
     out = _wrap("highlighted", "\\DIFadd{", "}")
     assert out == "\\DIFadd{highlighted}"
+
+
+# --- prefix/suffix anchoring of align() -------------------------------------
+
+
+def test_inserted_chapter_does_not_recolour_previous_passage() -> None:
+    # an inserted chapter between two near-identical passages must not
+    # drag the earlier passage into the insertion (blue bleed). The
+    # SequenceMatcher longest-block greedy choice pairs the trailing
+    # text with a later position; the common-prefix anchor prevents it.
+    old = (
+        "\\subsubsection*{set_log}\nsee Scene L2 API section\n\n\n"
+        "\\newpage\n\n\\subsection{Job Order}\nOld text here.\n"
+    )
+    new = (
+        "\\subsubsection*{set_log}\nsee Scene L2 API section\n\n\n"
+        "\\newpage\n\n\\subsection{Config}\nWhole new chapter.\n\n"
+        "\\newpage\n\n\\subsection{Job Order}\nOld text here.\n"
+    )
+    out = diff_documents(old, new).marked_up
+    # the 'see Scene L2 API section' passage stays unmarked (black)
+    assert "see Scene L2 API section\n\n\n\\newpage" in out
+    # ... and only the new chapter body is blue
+    assert "\\DIFadd{Config}" in out
+
+
+def test_block_head_similarity_pairing_of_wildcard_text() -> None:
+    # the wildcard 'text' signature lets a matching block glom a pair
+    # of unrelated text nodes; the right partner sits in the insertion
+    # gap right before the block. The refinement must pair by
+    # similarity: the trailing-whitespace delete + paragraph insert
+    # stay word-level, not whole-node.
+    old = (
+        "Some para about CpuCores. Whether this is set by the PI "
+        "is currently unclear and is TBC. \n\n"
+        "\\subsubsection{Examples}\nExample body.\n"
+    )
+    new = (
+        "Some para about CpuCores. Whether this is set by the PI "
+        "is currently unclear and is TBC.\n\n"
+        "Dynamic parameters with the prefix are used.\n\n"
+        "\\subsubsection{Examples}\nExample body.\n"
+    )
+    out = diff_documents(old, new).marked_up
+    # the unchanged sentence stays black...
+    assert "is currently unclear and is TBC.\\DIFdelbegin" in out
+    # ...and only whitespace was deleted (invisible strikethrough)
+    assert "\\DIFdel{is currently unclear" not in out
+
+
+# --- escape folding (parse) --------------------------------------------------
+
+
+def test_escape_macros_fold_into_adjacent_text_nodes() -> None:
+    # a revision writing an identifier with escaped underscores must
+    # present the same node granularity as one writing it plain,
+    # otherwise the word diff strikes the whole unchanged tail
+    from texdiff.parse import parse
+
+    old = (
+        "The duration is one S7A_CO2_1A_GEO file type. More text.\n"
+    )
+    new = (
+        "The duration is one CO2\\_1A\\_GEO\\_\\_\\_\\_\\_\\_ file type. "
+        "More text.\n"
+    )
+    out = diff_documents(old, new).marked_up
+    assert "file type. More text." in out  # unchanged tail stays black
+    assert "\\DIFdel{S7A_CO2_1A_GEO}" in out
+    assert "\\DIFadd{CO2\\_1A\\_GEO\\_\\_\\_\\_\\_\\_}" in out
+
+
+def test_escape_folding_keeps_round_trip() -> None:
+    from texdiff.parse import parse
+
+    src = "a\\_b and c\\&d and eighty\\% sure\n"
+    nodes = parse(src)
+    assert "".join(n.text for n in nodes) == src
+
+
+# --- added listings inside insert runs --------------------------------------
+
+
+def test_added_listing_lines_get_dif_markers() -> None:
+    # an inserted chapter's listing must render line-marked (%DIF >)
+    # inside a DIFcode alsolanguage environment, not fall back to the
+    # listings language styles (magenta # comments vs blue chapter)
+    old = "\\documentclass{book}\n\\begin{document}\nold\n\\end{document}\n"
+    new = (
+        "\\documentclass{book}\n\\begin{document}\nold\n"
+        "\\section{New YAML stuff}\n"
+        "Sample:\n\\begin{lstlisting}\nkey: value\n# a comment\n\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    assert "\\begin{lstlisting}[alsolanguage=DIFcode]" in out
+    assert "%DIF > key: value" in out
+    assert "%DIF > # a comment" in out
+
+
+def test_modified_listing_lines_get_dif_markers() -> None:
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\nkeep = 1\nold = 2\n\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\nkeep = 1\nnew = 3\n\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    assert "%DIF < old = 2" in out
+    assert "%DIF > new = 3" in out
+    assert "\\DIFmodbegin" in out
+
+
+def test_moved_listing_block_not_retired_and_readded() -> None:
+    # a struct block that moved position must emit once, unmarked,
+    # instead of being struck through at the old place and re-added
+    # blue at the new one
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\nhead();\nstruct A {\nint x;\n};\n"
+        "other();\nstruct B {\nint y;\n};\ntail();\n\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\nhead();\n"
+        "struct B {\nint z;\n};\n"
+        "other();\nstruct A {\nint x;\n};\ntail();\n\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    assert out.count("struct A {") == 1  # moved, not duplicated
+    assert out.count("int x;") == 1
+    assert "%DIF < int y;" in out
+    assert "%DIF > int z;" in out
+
+
+def test_reindentation_of_listing_not_marked() -> None:
+    # lines whose only change is indentation compare equal on
+    # stripped text and must not be retired and re-added wholesale
+    old = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\nstruct A {\nint x;\n};\n\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    new = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{lstlisting}\n  struct A {\n    int x;\n  };\n\\end{lstlisting}\n"
+        "\\end{document}\n"
+    )
+    out = diff_documents(old, new).marked_up
+    body = out.split("\\begin{document}", 1)[1]
+    assert "%DIF <" not in body
+    assert "%DIF >" not in body

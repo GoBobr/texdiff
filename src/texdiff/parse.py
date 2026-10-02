@@ -19,6 +19,7 @@ Design decisions (v0):
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from pylatexenc.latexwalker import (
@@ -201,7 +202,73 @@ def parse(source: str) -> list[Node]:
     if "".join(n.text for n in converted) != source:
         # round-trip broken: reject rather than emit wrong bytes
         raise ParseError("parse round-trip mismatch (node spans do not cover source)")
-    return converted
+    return _fold_escapes(converted)
+
+
+# --- escape folding -----------------------------------------------------------
+
+# Escape macros that typeset a literal character (``\_`` `` \& `` ...
+# ) carry no syntactic meaning: their only effect in prose is to
+# create a node boundary. When one revision writes ``ABCDE`` as one
+# text run and the other writes ``ABCD\_-E`` (the identical string
+# with an escaped underscore), the node lists disagree on
+# granularity: the aligner pairs the whole old run with just the
+# fragment before ``\_``, and the word diff then strikes out the
+# entire unchanged tail of the old run ("file type. When the list
+# ..."). Folding both into plain-text runs with identical structure
+# restores granularity symmetry; the exact source text is kept in
+# each node, so a folded span matching both sides round-trips
+# verbatim.
+_ESCAPE_MACRO_RE = re.compile(
+    r"\\(?:_|&|%|#|\$)\s*(?![a-zA-Z])"  # \_ \& \% \# \$ not part of \_cmd
+)
+
+
+def _is_glue_macro(node: Node) -> bool:
+    """True if node is an escape macro like ``\\_`` (no argument)."""
+    return (
+        node.kind == "macro"
+        and node.name in ("_", "&", "%", "#", "$")
+        and node.text.strip() == f"\\{node.name}"
+    )
+
+
+def _fold_escapes(nodes: list[Node]) -> list[Node]:
+    """Merge escape macros into an adjacent text node.
+
+    Recurses into recursable children. An escape macro between two
+    text nodes merges left (prose continuation); a leading escape
+    macro merges right. Standalone escapes (surrounded by structure)
+    stay untouched - text equality still round-trips them.
+    """
+    out: list[Node] = []
+    for node in nodes:
+        if node.children:
+            node = replace(node, children=_fold_escapes(node.children))
+        if _is_glue_macro(node) and out and out[-1].kind == "text":
+            out[-1] = replace(out[-1], text=out[-1].text + node.text)
+            continue
+        if (
+            _is_glue_macro(node)
+            and not out
+            and len(nodes) > 1
+            and nodes[1].kind == "text"
+        ):
+            # leading escape with text following: remember, merge right
+            out.append(node)
+            continue
+        if node.kind == "text" and out and _is_glue_macro(out[-1]):
+            out[-1] = replace(out[-1], text=out[-1].text + node.text)
+            continue
+        if node.kind == "text" and out and out[-1].kind == "text":
+            # consecutive text runs (an artefact of escape folding or
+            # of comments/verbatim dropped between them in earlier
+            # processing): merge so both revisions present prose with
+            # identical granularity - the aligner pairs like with like
+            out[-1] = replace(out[-1], text=out[-1].text + node.text)
+            continue
+        out.append(node)
+    return out
 
 
 def parse_file(path: str | Path) -> list[Node]:
