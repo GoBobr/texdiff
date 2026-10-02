@@ -1045,8 +1045,11 @@ PREAMBLE_TEMPLATE = """\
 %DIF PREAMBLE EXTENSION ADDED BY texdiff
 \\RequirePackage[normalem]{ulem} %DIF PREAMBLE
 \\RequirePackage{color} %DIF PREAMBLE
-\\providecommand{\\DIFadd}[1]{{\\protect\\color{blue}\\uwave{{#1}}}} %DIF PREAMBLE
-\\providecommand{\\DIFdel}[1]{{\\protect\\color{red}\\sout{{#1}}}} %DIF PREAMBLE
+%DIF single braces around the marked text: double braces make the
+%DIF \\uwave/\\sout argument one unbreakable box and long retired
+%DIF sentences run past the right page border
+\\providecommand{\\DIFadd}[1]{{\\protect\\color{blue}\\uwave{#1}}} %DIF PREAMBLE
+\\providecommand{\\DIFdel}[1]{{\\protect\\color{red}\\sout{#1}}} %DIF PREAMBLE
 %DIF block markers: colour declarations (visible outside tables)
 \\providecommand{\\DIFaddbegin}{\\color{blue}} %DIF PREAMBLE
 \\providecommand{\\DIFaddend}{\\color{black}} %DIF PREAMBLE
