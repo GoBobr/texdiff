@@ -157,13 +157,23 @@ def _hoist_retired_tables(edits: list[Edit]) -> list[Edit]:
     so this pre-pass swaps the two, keeping any whitespace-only
     matches between them attached after the hoisted deletion.
 
+    The same insert-first order appears when the new revision holds a
+    *duplicated* table: the alignment emits Insert(copy of the new
+    table) before the Modify(old table -> new table) that carries the
+    replacement. The Modify already renders red-then-blue, but its
+    retired half still lands after the inserted copy; the swap moves
+    the Modify ahead of the insert so all retired tables precede
+    their blue counterparts and numbering reads 33 (blue pair
+    replacement) then 34 (the additional new copy).
+
     The swap is narrow on purpose: the insert must carry a longtable,
-    the deleted node must hold a retireable longtable (data-row
-    count), and only whitespace may sit between the two. Anything
-    else - restructured Modify renders (old+new table in one edit,
-   Delete containing prose, several edits in between - is untouched.
+    the retired node must hold a retireable longtable (data-row
+    count) - either a Delete or a table-replacement Modify - and only
+    whitespace may sit between the two. Anything else - several
+    edits in between, prose deletions - is untouched.
     """
     out: list[Edit] = []
+    glue: list[Edit] = []
     pending: Insert | None = None
     for edit in edits:
         if isinstance(edit, Insert) and "\\begin{longtable" in edit.new.text:
@@ -171,25 +181,49 @@ def _hoist_retired_tables(edits: list[Edit]) -> list[Edit]:
                 out.append(pending)
             pending = edit
             continue
-        if (
-            pending is not None
-            and isinstance(edit, Delete)
-            and _is_retirable_table(edit.old.text)
+        elif pending is not None and (
+            (isinstance(edit, Delete) and _is_retirable_table(edit.old.text))
+            or (
+                isinstance(edit, Modify)
+                and _is_table_replacement(edit)
+                and _is_retirable_table(edit.old.text)
+            )
         ):
+            # either a retired Delete or a replacement Modify whose
+            # old side retires: its red half belongs before the
+            # pending inserted table, so the two swap; glue flushed
+            # between them
             out.append(edit)
+            out.extend(glue)
+            glue.clear()
             out.append(pending)
             pending = None
             continue
-        if isinstance(edit, Match) and not edit.node.text.strip():
+        if (
+            isinstance(edit, Match)
+            and not edit.node.text.strip()
+        ) or (
+            isinstance(edit, Modify)
+            and _align_state(edit)
+        ):
+            # whitespace-only glue between the inserted table and
+            # the retiring edit does not break the adjacency the
+            # swap keys on; it queues after the pending insert so a
+            # following retiring edit still swaps with it
             if pending is not None:
+                glue.append(edit)
+            else:
                 out.append(edit)
-                continue
+            continue
         if pending is not None:
             out.append(pending)
             pending = None
+        out.extend(glue)
+        glue.clear()
         out.append(edit)
     if pending is not None:
         out.append(pending)
+    out.extend(glue)
     return out
 
 
