@@ -316,6 +316,42 @@ class TestRetiredTablePolicy:
         assert "\\sout{sales figures}" in struck
         assert "\\addtocounter{table}{-1}" in struck
 
+    def test_retired_table_precedes_inserted_metadata_and_data_tables(self):
+        # GitHub #1: a region where the new revision gained a
+        # metadata ("Global dimensions") table BEFORE its (slightly
+        # changed) data table: the Insert queues up before the
+        # table-replacement Modify and the retiring Modify must hoist
+        # above the WHOLE queue so the struck old data table
+        # precedes the blue Global-dimensions table
+        dims = (
+            "\\begin{longtable}{ll}\n\\caption{Global dimensions}\n"
+            "dim & 1\\\\\n\\end{longtable}\n"
+        )
+        rows_old = "\n".join(f"old{i} & v{i}\\\\" for i in range(6))
+        rows_new = "\n".join(f"old{i} & w{i}\\\\" for i in range(6))
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            f"\\begin{{longtable}}{{ll}}\n\\caption{{data table}}\n"
+            f"{rows_old}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            + dims
+            + f"\\begin{{longtable}}{{ll}}\n\\caption{{data table}}\n"
+            f"{rows_new}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        i_dims = out.find("Global dimensions")
+        assert i_dims >= 0, "inserted dimensions table lost"
+        # the old data table content must render (structurally:
+        # struck) BEFORE the inserted metadata table
+        i_stuck = out.find("\\sout")
+        assert i_stuck >= 0 and i_stuck < i_dims, (
+            "retired table must precede the inserted metadata table"
+        )
+
     def test_strike_through_guarded_caption_e2e(self):
         # strike_through applies the guard to real caption lines
         struck = tables.strike_through("Grid of something:\n\\caption{Regular grid, layer and parameter}\nvar & x\\\\\n")

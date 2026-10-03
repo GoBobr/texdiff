@@ -282,8 +282,12 @@ def _apply_macro_markup(
                 # keep the NEW revision's bytes: brace/structure
                 # placement (e.g. the macro's closing "}") belongs to
                 # the new document - old bytes would close the body
-                # prematurely and leak later lines outside the macro
-                merged.extend(new_body[i1:i2])
+                # prematurely and leak later lines outside the macro.
+                # NOTE: equal ranges are indexed by the NEW side here
+                # (j1:j2); using the old-side i1:i2 drifts whenever
+                # the bodies differ in length and drops the macro's
+                # closing brace (GitHub #1).
+                merged.extend(new_body[j1:j2])
             elif tag == "delete":
                 merged.extend(f"%DIF < {l}" for l in old_body[i1:i2])
             elif tag == "insert":

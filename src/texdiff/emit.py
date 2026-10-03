@@ -174,14 +174,12 @@ def _hoist_retired_tables(edits: list[Edit]) -> list[Edit]:
     """
     out: list[Edit] = []
     glue: list[Edit] = []
-    pending: Insert | None = None
+    pending: list[Insert] = []
     for edit in edits:
         if isinstance(edit, Insert) and "\\begin{longtable" in edit.new.text:
-            if pending is not None:
-                out.append(pending)
-            pending = edit
+            pending.append(edit)
             continue
-        elif pending is not None and (
+        elif pending and (
             (isinstance(edit, Delete) and _is_retirable_table(edit.old.text))
             or (
                 isinstance(edit, Modify)
@@ -191,13 +189,17 @@ def _hoist_retired_tables(edits: list[Edit]) -> list[Edit]:
         ):
             # either a retired Delete or a replacement Modify whose
             # old side retires: its red half belongs before the
-            # pending inserted table, so the two swap; glue flushed
-            # between them
+            # pending inserted table(s), so the two swap; glue
+            # flushed between them. Several inserted tables may
+            # queue up (a metadata "Global dimensions" table plus
+            # its data table, both new in one region) - the retiring
+            # edit hoists above the whole queue, keeping the queue's
+            # order intact (GitHub #1).
             out.append(edit)
             out.extend(glue)
             glue.clear()
-            out.append(pending)
-            pending = None
+            out.extend(pending)
+            pending.clear()
             continue
         if (
             isinstance(edit, Match)
@@ -210,19 +212,19 @@ def _hoist_retired_tables(edits: list[Edit]) -> list[Edit]:
             # the retiring edit does not break the adjacency the
             # swap keys on; it queues after the pending insert so a
             # following retiring edit still swaps with it
-            if pending is not None:
+            if pending:
                 glue.append(edit)
             else:
                 out.append(edit)
             continue
-        if pending is not None:
-            out.append(pending)
-            pending = None
+        if pending:
+            out.extend(pending)
+            pending.clear()
         out.extend(glue)
         glue.clear()
         out.append(edit)
-    if pending is not None:
-        out.append(pending)
+    if pending:
+        out.extend(pending)
     out.extend(glue)
     return out
 
