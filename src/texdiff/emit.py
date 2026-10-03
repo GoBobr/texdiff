@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Iterator
 
 from .align import Delete, Edit, Insert, Match, Modify
@@ -650,6 +651,19 @@ def _comment_out_rows(text: str) -> str:
 # (bare structure commands are legal only outside a cell's group)
 _STRUCT_LINE_RE = re.compile(r"^\s*\\(?:hline|endhead|endfoot|rowcolor|caption)\b")
 
+# lines that are structure AND NOTHING ELSE: '\\hline', '\\endhead'
+# ... - a leading '\\rowcolor{..} & content..' or '\\caption' with
+# trailing text on the same line carries content and must be diffed
+_PURE_STRUCT_LINE_RE = re.compile(
+    r"\\(?:endfirsthead|endhead|endfoot|endlastfoot)\s*$"
+)
+# the leading token of a table row line (kept outside the similarity
+# measures above): a bare structure command or a colour-only row
+_ROW_TOKEN_RE = re.compile(
+    r"^(?:\\hline|\\hdashline|\\toprule|\\midrule|\\bottomrule"
+    r"|\\rowcolor\{[^}]*\}\s*)$"
+)
+
 
 def _color_lines(text: str) -> str:
     """Colour added lines blue, existing ones black (refine-diff).
@@ -973,14 +987,63 @@ def _render_row_region(edits: list[Edit], markup: LatexdiffMarkup) -> str:
     return "".join(out)
 
 
+def _row_content_lines(row: str) -> list[str]:
+    """Content-bearing source lines of a row region (no pure structure).
+
+    A single-line longtable row yields just ``{\\hline, <row>}``
+    after normalisation - and ``\\hline`` is shared by EVERY row.
+    Pairing must therefore look at *content* lines only, otherwise
+    any adjacent Delete+Insert qualifies as "the same logical row"
+    (the mis-merge that struck old variable rows out of existence:
+    a deleted ``kiso_445`` row merged into an unrelated inserted
+    ``coordinates`` row and its content was dropped silently).
+    A line starting with ``\\rowcolor`` still carries cell content
+    after it - only ``\\rowcolor{..}`` with nothing following is
+    structure.
+    """
+    return [
+        l
+        for l in row.split("\n")
+        if l.strip() and not _PURE_STRUCT_LINE_RE.fullmatch(l.strip())
+    ]
+
+
 def _row_pair_matches(old_row: str, new_row: str) -> bool:
-    """Do a deleted/inserted row pair look like the same logical row?"""
-    old_lines = {l for l in (oldlines.norm_line(x) for x in old_row.split("\n")) if l}
-    new_lines = {l for l in (oldlines.norm_line(x) for x in new_row.split("\n")) if l}
+    """Do a deleted/inserted row pair look like the same logical row?
+
+    Structure tokens (``\\hline`` ...) are shared by every row and
+    must not count towards the similarity - otherwise ANY adjacent
+    Delete+Insert pair qualifies (a deleted variable row would then
+    merge into an unrelated inserted attribute row and its content
+    silently disappear from the diff).
+    """
+    old_lines = {
+        oldlines.norm_line(x)
+        for x in _row_content_lines(old_row)
+        if not _ROW_TOKEN_RE.match(x.strip())
+        if (n := oldlines.norm_line(x))
+    }
+    new_lines = {
+        oldlines.norm_line(x)
+        for x in _row_content_lines(new_row)
+        if not _ROW_TOKEN_RE.match(x.strip())
+        if (n := oldlines.norm_line(x))
+    }
     if not old_lines or not new_lines:
         return False
     shared = old_lines & new_lines
-    return len(shared) >= max(len(old_lines), len(new_lines)) * _ROW_MERGE_SIMILARITY
+    if len(shared) >= max(len(old_lines), len(new_lines)) * _ROW_MERGE_SIMILARITY:
+        return True
+    # typo-level row rewrite with no line fully shared: fall back to
+    # whole-region similarity so "Inpu[p]t"-style fixes still merge,
+    # while unrelated rows (new variable vs old attribute block)
+    # stay separate
+    ratio = SequenceMatcher(
+        None,
+        "".join(sorted(old_lines)),
+        "".join(sorted(new_lines)),
+    ).ratio()
+    return ratio >= 0.60
 
 
 _ROW_MERGE_SIMILARITY = 0.35  # shared-line fraction below which pairs stay separate
@@ -1016,14 +1079,14 @@ def _merge_row_pair(
         l
         for l in old_lines
         if l.strip()
-        and not _STRUCT_LINE_RE.match(l)
+        and not _PURE_STRUCT_LINE_RE.fullmatch(l.strip())
         and oldlines.norm_line(l) not in new_norms
     ]
     add_only = [
         l
         for l in new_lines
         if l.strip()
-        and not _STRUCT_LINE_RE.match(l)
+        and not _PURE_STRUCT_LINE_RE.fullmatch(l.strip())
         and oldlines.norm_line(l) not in {oldlines.norm_line(x) for x in old_lines}
     ]
     pair_map: dict[int, str] = {}  # index in del_only -> rendered replacement
@@ -1066,14 +1129,13 @@ def _merge_row_pair(
         is_add_only = ai if (ai < len(add_only) and line == add_only[ai]) else None
         if is_add_only is not None:
             if is_add_only in rendered_added:
-                # word-level pair: emit the marked pair line instead
                 out.append(new_pair_map[is_add_only])
             elif oldlines.in_old(line):
                 out.append(re.sub(r"^(\s*)(\S.*)$", r"\1\\color{black} \2", line))
             else:
                 out.append(re.sub(r"^(\s*)(\S.*)$", r"\1\\color{blue} \2", line))
             ai += 1
-        elif _STRUCT_LINE_RE.match(line):
+        elif _PURE_STRUCT_LINE_RE.fullmatch(s):
             out.append(" " + s if not line[:1].isspace() else line)
         elif oldlines.in_old(line):
             out.append(re.sub(r"^(\s*)(\S.*)$", r"\1\\color{black} \2", line))

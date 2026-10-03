@@ -352,6 +352,58 @@ class TestRetiredTablePolicy:
             "retired table must precede the inserted metadata table"
         )
 
+    def test_unrelated_adjacent_delete_insert_rows_stay_separate(self):
+        # GitHub #1 follow-up (scene ADS LSA table): a deleted
+        # variable row followed by an unrelated inserted attribute
+        # row must NOT merge into one logical row. Rows are single
+        # lines sharing only \hline after normalisation, which used
+        # to satisfy the 35%-shared-line test and silently drop the
+        # old row's content (kiso_445 "appeared out of the blue")
+        old_row = (
+            "\\rowcolor{lightcyan} \\textbf{kiso\\-\\_445} & "
+            "BRDF parameter kiso at 445 nm. & short & "
+            "\\emph{valid\\_min} to \\emph{valid\\_max} & dim1, dim1\\\\"
+        )
+        new_row = (
+            "\\rowcolor{lightcyan} \\textbf{kiso\\-\\_445} & "
+            "VIIRS BRDF albedo parameter kiso_445 & short & "
+            "\\emph{valid\\_min} to \\emph{valid\\_max} & lat, lon\\\\"
+        )
+        other_row = "coordinates & Coordinate variables (CF) & string & lat lon & \\\\"
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{longtable}{lllll}\n"
+            "name & desc & type & range & dims\\\\\n"
+            + old_row + "\n\\end{longtable}\n\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{longtable}{lllll}\n"
+            "name & desc & type & range & dims\\\\\n"
+            + other_row + "\n" + new_row
+            + "\n\\end{longtable}\n\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        # the old row content must survive visibly (struck), not be
+        # commented away into nothing
+        assert "BRDF parameter kiso at 445 nm" in out
+        assert "\\DIFdel{BRDF parameter kiso at 445 nm.}" in out
+        # new content present too
+        assert "VIIRS BRDF albedo parameter kiso_445" in out
+
+    def test_typo_level_row_rewrite_still_merges(self):
+        # genuinely similar rows (same logical row, small fix) keep
+        # the single merged-row treatment
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{longtable}{ll}\n\\caption{vars}\\\\\n"
+            "a & Inpu variable\\\\\n\\end{longtable}\n\\end{document}\n"
+        )
+        new_src = old_src.replace("Inpu", "Input")
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        # one row carrying both marks, not a deleted + re-added pair
+        assert "\\DIFdel{Inpu}" in out and "\\DIFadd{Input}" in out
+
     def test_strike_through_guarded_caption_e2e(self):
         # strike_through applies the guard to real caption lines
         struck = tables.strike_through("Grid of something:\n\\caption{Regular grid, layer and parameter}\nvar & x\\\\\n")
