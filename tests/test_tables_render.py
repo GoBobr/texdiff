@@ -573,3 +573,161 @@ class TestHeadMarkerInMergedRow:
         # the grid separator of the glued lead survives
         assert "\\DIFdel{float32}" in out
         assert "\\DIFadd{float}" in out
+
+
+class TestGroupedRowPairing:
+    """Group-scoped same-key row pairing (variable/attribute tables).
+
+    A grouped table repeats its attribute keys (``units``,
+    ``\_FillValue``, ...) in every variable group; key equality
+    alone cannot tell one group's ``units`` from another's. Unique
+    keys (the variable rows) act as group barriers: pairing across
+    a barrier word-diffs the units value of one variable into
+    another variable's row.
+    """
+
+    @staticmethod
+    def _doc(rows: str) -> str:
+        return (
+            "\\documentclass{article}\n\\usepackage{longtable}\n"
+            "\\begin{document}\n"
+            "\\begin{longtable}{lllll}\n"
+            "\\hline\n\\rowcolor{lightgray} \\textbf{Name} & "
+            "\\textbf{Desc} & \\textbf{Type} & \\textbf{Value} & "
+            "\\textbf{Dims}\\\\\n\\hline\n\\endfirsthead\n\\endfoot\n\\endlastfoot\n"
+            + rows
+            + "\\hline\n\\end{longtable}\n\\end{document}\n"
+        )
+
+    @staticmethod
+    def _old_group(name: str, unit: str) -> str:
+        return (
+            f"\\rowcolor{{lightcyan}} \\textbf{{{name}}} & {name} desc & float"
+            f" & vr & d1,d2 \\\\\n\\hline\n"
+            "long\\_name & Variable long name & string & See & \\\\\n\\hline\n"
+            f"units & Physical units & string & {unit} & \\\\\n\\hline\n"
+            "valid\\_min & Valid minimum & float & -9.9e+36 & \\\\\n\\hline\n"
+            "valid\\_max & Valid maximum & float & 9.9e+36 & \\\\\n\\hline\n"
+            "\\_FillValue & Missing value & float & 9.9e+36 & \\\\\n\\hline\n"
+        )
+
+    @staticmethod
+    def _new_group(name: str) -> str:
+        return (
+            f"\\rowcolor{{lightcyan}} \\textbf{{{name}}} & {name} desc & float"
+            f" & vr & lon,lat \\\\\n\\hline\n"
+            "scale\\_factor & Scale factor & double & 1 & \\\\\n\\hline\n"
+            "add\\_offset & Offset & double & 0 & \\\\\n\\hline\n"
+            "valid\\_range & Valid range & float & 0 to 3.4e38 & \\\\\n\\hline\n"
+            "units & Physical units & string & - & \\\\\n\\hline\n"
+            "\\_FillValue & Missing value & float & -1.1e-38 & \\\\\n\\hline\n"
+            "long\\_name & Variable long name & string & See & \\\\\n\\hline\n"
+        )
+
+    def test_units_merge_stays_within_group(self, ):
+        old = (
+            self._old_group("var\\-\\_alpha", "Pa")
+            + self._old_group("var\\-\\_beta", "K")
+            + self._old_group("var\\-\\_gamma", "m2 s-2")
+        )
+        new = (
+            self._new_group("var\\-\\_alpha")
+            + self._new_group("var\\-\\_beta")
+            + self._new_group("var\\-\\_gamma")
+        )
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # each group's units row merges with ITS OWN old value (struck)
+        for unit in ("Pa", "K", "m2 s-2"):
+            assert f"\\DIFdel{{{unit}}}" in out
+        # cross-group mixing would strike one unit value in a merged
+        # row that sits under a DIFFERENT variable anchor: check the
+        # units-per-group pairing by position - the struck Pa row
+        # must precede the var_beta anchor row
+        i_pa = out.find("\\DIFdel{Pa}")
+        i_beta = out.find("\\textbf{var\\-\\_beta}")
+        assert i_pa != -1 and i_beta != -1 and i_pa < i_beta
+        i_k = out.find("\\DIFdel{K}")
+        i_gamma = out.find("\\textbf{var\\-\\_gamma}")
+        assert i_k != -1 and i_gamma != -1 and i_k < i_gamma
+
+    def test_unique_key_row_never_paired_across_barrier(self):
+        # a deleted attribute key with its counterpart only in a
+        # LATER group must not pair across the variable-anchor row:
+        # it retires (struck) instead of merging with the wrong group
+        old = self._old_group("solo", "Hz") + self._old_group("other", "Pa")
+        new = self._new_group("solo") + self._new_group("other")
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # Hz belongs to the first group: whatever its treatment, it
+        # must appear before the second group's anchor
+        i_hz = out.find("Hz")
+        i_other = out.find("\\textbf{other}")
+        assert i_hz != -1 and i_hz < i_other
+
+    def test_reordered_groups_keep_attribute_rows_with_own_anchor(self):
+        # variables reordered between revisions: plain sequence
+        # alignment cannot express a "move", so old groups' attribute
+        # rows would straddle other groups' new anchors. Block
+        # alignment must word-diff each matched group pair so every
+        # struck unit value stays inside its own group.
+        old = (
+            self._old_group("var\\-\\_alpha", "Pa")
+            + self._old_group("var\\-\\_beta", "K")
+            + self._old_group("var\\-\\_gamma", "m2 s-2")
+        )
+        new = (
+            self._new_group("var\\-\\_alpha")
+            + self._new_group("var\\-\\_gamma")
+            + self._new_group("var\\-\\_beta")
+        )
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # every struck unit value must sit INSIDE its own group: the
+        # nearest anchor name before each struck unit is that
+        # group's. Anchor rows render either struck (DIFdel) or
+        # matched verbatim, and always contain the plain group
+        # name, so search plain names.
+        for unit, name in (
+            ("Pa", "alpha"),
+            ("K", "beta"),
+            ("m2 s-2", "gamma"),
+        ):
+            i_unit = out.find(f"\\DIFdel{{{unit}}}")
+            assert i_unit != -1, f"missing struck {unit}"
+            before = out[:i_unit]
+            nearest = max(
+                before.rfind(t) for t in ("alpha", "beta", "gamma")
+            )
+            assert nearest != -1
+            assert before.rfind(name) == nearest, (
+                f"{unit} merged into the wrong group's rows"
+                f" (nearest anchor is not {name})"
+            )
+
+    def test_reordered_groups_retire_whole_group_not_straddle(self):
+        # a group dropped during a reorder must retire wholesale:
+        # its struck rows stay together, not entangled with the added
+        # rows of the group that took its position
+        old = (
+            self._old_group("var\\-\\_alpha", "Pa")
+            + self._old_group("var\\-\\_beta", "K")
+            + self._old_group("var\\-\\_gamma", "m2 s-2")
+        )
+        new = (
+            self._new_group("var\\-\\_alpha")
+            + self._new_group("var\\-\\_new")
+            + self._new_group("var\\-\\_beta")
+        )
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # gamma retired wholesale: from its LAST occurrence to the
+        # end of the body no DIFadd of the inserted groups appears
+        # inside the retired block, and no alpha/beta rows are
+        # entangled in it
+        gamma_all = [
+            m.start() for m in __import__("re").finditer("gamma", out)
+        ]
+        assert gamma_all, "missing gamma"
+        start = gamma_all[-1]
+        end = out.find("\\end{longtable}", start)
+        retired = out[start:end]
+        assert "\\DIFadd" not in retired, (
+            "retired group's rows are entangled with inserted rows"
+        )

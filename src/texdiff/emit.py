@@ -1535,6 +1535,45 @@ def _render_row_region(edits: list[Edit], markup: LatexdiffMarkup) -> str:
     return "".join(out)
 
 
+def _row_key_of(edit: Edit) -> str | None:
+    """Normalised first-cell key of a row edit, None for non-rows."""
+    node = getattr(edit, "old", None) or getattr(edit, "new", None)
+    if node is None or node.kind != "row":
+        return None
+    cells = _row_key_cells(node.text)
+    if not cells:
+        return None
+    key = _cell_key(cells[0])
+    return key or None
+
+
+def _segment_ids(edits: list[Edit]) -> list[int]:
+    """Group-segment id per edit index for same-key row pairing.
+
+    Grouped tables (variable row followed by one row per attribute:
+    ``scale_factor``, ``units``, ... under each variable) repeat
+    their attribute keys in every group, so key equality alone
+    cannot tell the ``units`` of one variable from the ``units`` of
+    another. Rows whose key occurs EXACTLY ONCE in the region -
+    the variable rows - act as group barriers: a repeated key
+    belongs to the group (segment) between the two barriers that
+    enclose it. Pairing a Delete with an Insert across a barrier
+    merges rows that never belonged together (the units value of
+    one variable word-diffed into another variable's row).
+    """
+    from collections import Counter
+
+    keys = [_row_key_of(e) for e in edits]
+    counts = Counter(k for k in keys if k)
+    seg = []
+    current = 0
+    for k in keys:
+        if k and counts[k] == 1:
+            current += 1  # barrier: unique-key row starts a new segment
+        seg.append(current)
+    return seg
+
+
 def _group_keyed_row_pairs(edits: list[Edit]) -> list[Edit]:
     """Make same-key Delete/Insert row pairs adjacent.
 
@@ -1548,30 +1587,36 @@ def _group_keyed_row_pairs(edits: list[Edit]) -> list[Edit]:
     Delete sits immediately before its matching (same key cell)
     Insert, in either original order; unmatchable edits keep their
     relative order. Pure movement - no edit is dropped or duplicated.
+
+    Pairing is segment-scoped (:func:`_segment_ids`): a Delete only
+    pairs with an Insert of the same group, never across a
+    unique-key barrier row.
     """
+    seg = _segment_ids(edits)
     used_ins: set[int] = set()
 
-    def partner(d_idx: int, seq: list[Edit]) -> int | None:
-        d = seq[d_idx]
-        if not isinstance(d, Delete) or d.old.kind != "row":
+    def partner(d_seg: int, d: Delete, seq: list[tuple[Edit, int]]) -> int | None:
+        if d.old.kind != "row":
             return None
-        for j, cand in enumerate(seq):
-            if j == d_idx or j in used_ins:
+        for j, (cand, c_seg) in enumerate(seq):
+            if cand is d or id(cand) in used_ins:
                 continue
             if not isinstance(cand, Insert) or cand.new.kind != "row":
+                continue
+            if c_seg != d_seg:
                 continue
             if _keyed_equality(d, cand):
                 return j
         return None
 
-    seq: list[Edit] = list(edits)
+    seq: list[tuple[Edit, int]] = list(zip(edits, seg))
     result: list[Edit] = []
     while seq:
-        e = seq[0]
+        e, e_seg = seq[0]
         if isinstance(e, Delete):
-            j = partner(0, seq)
+            j = partner(e_seg, e, seq)
             if j is not None:
-                ins = seq[j]
+                ins = seq[j][0]
                 rest = [x for k, x in enumerate(seq) if k not in (0, j)]
                 # adjacency achieved at the delete's position
                 result.extend([e, ins])
@@ -1782,12 +1827,29 @@ def _find_key_partner(
     exactly, or as a typo-level rewrite with 60% overall row
     similarity. Exact key matches pair regardless of how much the
     attribute cells were rewritten (regenerated tables).
+
+    Group-scoped: the scan stops at a unique-key row (a group
+    barrier - the variable row of a grouped variable/attribute
+    table). Without that stop, the deleted ``units`` of one group
+    pairs with the inserted ``units`` of a LATER group and the
+    per-cell merge word-diffs values across groups that never
+    belonged together.
     """
+    from collections import Counter
+
     old_cells = _row_key_cells(delete.old.text)
     if len(old_cells) < 2:
         return None
+    counts = Counter(
+        k
+        for k in (_row_key_of(e) for e in edits)
+        if k
+    )
     for j in range(start, min(start + _KEY_PARTNER_WINDOW, len(edits))):
         cand = edits[j]
+        k = _row_key_of(cand)
+        if k and counts[k] == 1:
+            break  # group barrier: no partner beyond the group's rows
         if not isinstance(cand, Insert) or cand.new.kind != "row":
             continue
         if _keyed_equality(delete, cand):

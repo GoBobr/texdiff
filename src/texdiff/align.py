@@ -82,7 +82,23 @@ def align(old: list[Node], new: list[Node]) -> list[Edit]:
        text becomes :class:`Match`, differing text :class:`Modify`;
     4. gap regions become ``Delete`` (old-only) then ``Insert``
        (new-only) sequences, preserving document order.
+
+    A pure row list whose rows form anchored groups (unique-key
+    variable rows each followed by repeated-key attribute rows)
+    takes the group-block alignment instead
+    (:func:`_align_grouped_rows`): sequence alignment cannot
+    express "moved", and grouped tables whose groups are REORDERED
+    between revisions would render each moved group's old rows
+    strung across other groups' new rows.
     """
+    if _is_grouped_row_list(old) and _is_grouped_row_list(new):
+        grouped = _align_grouped_rows(old, new)
+        if grouped is not None:
+            return grouped
+    return _align_plain(old, new)
+
+
+def _align_plain(old: list[Node], new: list[Node]) -> list[Edit]:
 
     def _pair(o: Node, n: Node) -> Edit:
         if o.text == n.text:
@@ -229,6 +245,140 @@ def align(old: list[Node], new: list[Node]) -> list[Edit]:
     edits = _table_keyed_pair_rescue(edits, _pair)
     edits = _hoist_table_head_inserts(edits)
     return edits
+
+
+_GROUP_MIN_ROWS = 6  # a grouped table needs anchors AND attributes
+
+
+def _anchor_key(node: Node) -> str:
+    """First-cell key of a row node, ignoring markup and structure.
+
+    The first ``&``-bearing line of the row's text holds the cells;
+    leading lines are pure ``\\hline`` structure that the parser
+    glues onto the row. Falls back to the whole-row content key when
+    the row has no cells (e.g. a caption or multicolumn row).
+    """
+    import re as _re
+
+    first = ""
+    for line in (node.text or "").splitlines():
+        if "&" in line:
+            first = line
+            break
+    if not first:
+        return node.name or node.signature()
+    cell = first.split("&", 1)[0]
+    cell = _re.sub(r"\\rowcolor\s*\{[^}]*\}", "", cell)
+    cell = _re.sub(r"\\textbf\s*\{([^}]*)\}", r"\1", cell)
+    cell = cell.replace("\\-", "").replace("\\_", "_").replace("\\", "")
+    return _re.sub(r"[^A-Za-z0-9_/]", "", cell)
+
+
+def _is_grouped_row_list(nodes: list[Node]) -> bool:
+    """True when a node list is a table body of anchored row groups.
+
+    Grouped variable/attribute tables: a unique-key variable row
+    (the anchor) followed by repeated-key attribute rows (``units``,
+    ``\\_FillValue``, ...). Requires at least two anchors and at least
+    one repeated key so plain tables and one-row-per-variable tables
+    keep the ordinary sequence alignment. The first-cell key is used,
+    not the whole-row content key, so a ``units Pa`` row counts as
+    ``units`` - repeated like every group's units row - not as an
+    anchor.
+    """
+    from collections import Counter
+
+    rows = [n for n in nodes if n.kind == "row"]
+    if len(rows) < _GROUP_MIN_ROWS or len(rows) != len(nodes):
+        return False
+    counts = Counter(k for k in (_anchor_key(n) for n in rows) if k)
+    anchors = sum(1 for c in counts.values() if c == 1)
+    repeated = sum(1 for c in counts.values() if c > 1)
+    return anchors >= 2 and repeated >= 1
+
+
+def _align_grouped_rows(old: list[Node], new: list[Node]) -> list[Edit] | None:
+    """Block-align an anchored-group row table (optionally reordered).
+
+    Splits both bodies into group blocks at unique-key anchor rows
+    (``variable & ... \\`` followed by its ``attr & ... \\\\`` rows),
+    matches blocks by anchor signature with ``SequenceMatcher``, and
+    aligns the row lists INSIDE each matched block pair with the
+    ordinary row alignment. Old-only blocks retire wholesale, new-only
+    blocks insert wholesale - a group never straddles another group's
+    rows, whatever the reordering between revisions.
+
+    Returns None (caller falls back to plain sequence alignment) when
+    the block structure is degenerate: fewer than two matched blocks
+    or a block whose rows exceed a sane group size (the anchor
+    detection would be splitting an ordinary table, not groups).
+    """
+    from collections import Counter
+
+    def blocks(nodes: list[Node]) -> list[list[Node]]:
+        # Split right before every row whose first-cell key is unique
+        # within the table - such rows are group anchors (variable
+        # name rows). Attribute rows repeat their key (``units``,
+        # ``flag_values`` ...) and never split. Using the first cell,
+        # NOT the whole-row content key, matters: a ``units Pa`` row
+        # is content-unique but keyed ``units`` like every other
+        # group's units row.
+        keys = [_anchor_key(n) for n in nodes if n.kind == "row"]
+        counts = Counter(k for k in keys if k)
+        out: list[list[Node]] = []
+        cur: list[Node] = []
+        for n in nodes:
+            if n.kind == "row" and counts.get(_anchor_key(n)) == 1 and cur:
+                out.append(cur)
+                cur = []
+            cur.append(n)
+        if cur:
+            out.append(cur)
+        return out
+
+    old_blocks = blocks(old)
+    new_blocks = blocks(new)
+    if len(old_blocks) < 2 or len(new_blocks) < 2:
+        return None
+    if max(map(len, old_blocks + new_blocks)) > 12:
+        # implausibly large "group": the anchors are not grouping
+        return None
+
+    sm = SequenceMatcher(
+        a=[_anchor_key(b[0]) for b in old_blocks],
+        b=[_anchor_key(b[0]) for b in new_blocks],
+        autojunk=False,
+    )
+    edits: list[Edit] = []
+    matched = 0
+    prev_a = prev_b = 0
+    for block in sm.get_matching_blocks():
+        # gap: whole old-only groups retire, then new-only groups add
+        edits.extend(Delete(old=n) for b in old_blocks[prev_a : block.a] for n in b)
+        edits.extend(Insert(new=n) for b in new_blocks[prev_b : block.b] for n in b)
+        for ob, nb in zip(old_blocks[block.a : block.a + block.size],
+                          new_blocks[block.b : block.b + block.size]):
+            edits.extend(_align_rows_within_group(ob, nb))
+            matched += 1
+        prev_a, prev_b = block.a + block.size, block.b + block.size
+    edits.extend(Delete(old=n) for b in old_blocks[prev_a:] for n in b)
+    edits.extend(Insert(new=n) for b in new_blocks[prev_b:] for n in b)
+    if matched < 2:
+        return None  # nothing group-like matched: keep plain alignment
+    return edits
+
+
+def _align_rows_within_group(old_rows: list[Node], new_rows: list[Node]) -> list[Edit]:
+    """Ordinary row alignment confined to one matched group block.
+
+    Rows within a group keep their relative order between revisions,
+    so the SequenceMatcher-based :func:`align` body (without the
+    grouped-row dispatch, which would recurse) aligns them well:
+    shared rows Match, changed attribute rows pair for the per-cell
+    keyed merge, added attributes Insert, removed ones Delete.
+    """
+    # plain align(), bypassing the grouped dispatch on purpose
+    return _align_plain(old_rows, new_rows)
 
 
 def _hoist_table_head_inserts(edits: list[Edit]) -> list[Edit]:
