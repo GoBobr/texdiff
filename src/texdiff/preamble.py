@@ -279,11 +279,14 @@ def _apply_macro_markup(
         merged: list[str] = []
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
             if tag == "equal":
-                # keep the NEW revision's bytes: brace/structure
-                # placement (e.g. the macro's closing "}") belongs to
-                # the new document - old bytes would close the body
-                # prematurely and leak later lines outside the macro
-                merged.extend(new_body[i1:i2])
+                # equal ranges are index-aligned to the OLD body
+                # (i1/i2) and the NEW body (j1/j2) separately; the
+                # kept bytes must come from the NEW revision, so the
+                # slice runs over the NEW indices. Using i1/i2 here
+                # re-emits earlier new-side lines (a duplicated
+                # table row) and silently drops the tail of the
+                # body - including the macro's closing brace.
+                merged.extend(new_body[j1:j2])
             elif tag == "delete":
                 merged.extend(f"%DIF < {l}" for l in old_body[i1:i2])
             elif tag == "insert":
