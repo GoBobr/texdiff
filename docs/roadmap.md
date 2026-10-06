@@ -11,7 +11,7 @@
 - [x] CLI: `texdiff old.tex new.tex > diff.tex`
 - [x] contract test suite, coverage gate ≥ 80%
 
-## v1 — real documents (current, released as 0.2.0)
+## v1 — real documents (current, in development toward 0.2.1)
 
 - [x] `\input`/`\include` expansion (flatten inside the tool, with
       per-tree asset resolution and marker comments)
@@ -37,7 +37,8 @@
       (synthetic multi-revision documents exercising longtable
       headers, math, verbatim and row insertions)
 - [x] PyPI release: `publish` workflow on `v*` tags via trusted
-      publishing (OIDC); version 0.2.0
+      publishing (OIDC); version 0.2.0; next: 0.2.1 with the table
+      rendering fixes
 - [ ] `latexdiff` fallback engine behind `--engine` — deferred until
       there is a document class texdiff cannot digest
 - [x] ~~HTML side-by-side report~~ — removed from scope: rendered PDF

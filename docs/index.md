@@ -20,7 +20,7 @@ user eventually maintains a pile of fragile pre/post-processing scripts.
 
 ## Status
 
-**v0.2.0:** parse (pylatexenc) → align → render pipeline with the
+**v0.2.1:** parse (pylatexenc) → align → render pipeline with the
 three latexdiff-killer guarantees:
 
 1. unchanged node text round-trips byte-identically,

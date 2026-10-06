@@ -51,7 +51,7 @@ pip install texdiff        # or from a checkout:
 pip install -e ".[dev]" && pytest
 ```
 
-Status: **v0.2.0** — core pipeline plus flattening, row-granular table
+Status: **v0.2.1** — core pipeline plus flattening, row-granular table
 alignment, preamble policy, `--check` and a compile-guaranteed corpus in
 CI; validated on a 65-page generated longtable-heavy document. See the
 [roadmap](https://gobobr.github.io/texdiff/roadmap/) for what is next.
