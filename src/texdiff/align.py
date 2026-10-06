@@ -15,7 +15,7 @@ positionally within the run.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from difflib import SequenceMatcher
 
 from .nodes import Node
@@ -26,6 +26,7 @@ class Match:
     """A node kept verbatim (identical on both sides)."""
 
     node: Node
+    group: int | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class Modify:
     old: Node
     new: Node
     inner: "list[Edit] | None" = None
+    group: int | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,7 @@ class Insert:
     """A node present only in the new version."""
 
     new: Node
+    group: int | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,7 @@ class Delete:
     """A node present only in the old version."""
 
     old: Node
+    group: int | None = None
 
 
 Edit = Match | Modify | Insert | Delete
@@ -323,15 +327,70 @@ def _align_grouped_rows(old: list[Node], new: list[Node]) -> list[Edit] | None:
         # NOT the whole-row content key, matters: a ``units Pa`` row
         # is content-unique but keyed ``units`` like every other
         # group's units row.
+        #
+        # A unique key alone is not proof of an anchor: a variable
+        # may carry an attribute that no OTHER variable repeats (a
+        # one-off ``scale_factor`` row) - splitting there fragments
+        # the group and the fragments then pair against the wrong
+        # counterpart rows. Generated spec tables mark their
+        # variable rows with a row color + bold leading cell and
+        # leave attribute rows plain; the decoration is the primary
+        # anchor signal, and the count/next-key heuristics below are
+        # the fallback for undecorated tables.
+        def _is_decorated_anchor(n: Node) -> bool:
+            first = ""
+            for line in (n.text or "").splitlines():
+                if "&" in line:
+                    first = line
+                    break
+            return (
+                "\\rowcolor" in first
+                and "\\textbf" in first.split("&", 1)[0]
+            )
+
         keys = [_anchor_key(n) for n in nodes if n.kind == "row"]
         counts = Counter(k for k in keys if k)
+        row_idx = {id(n): p for p, n in enumerate(nodes) if n.kind == "row"}
+        pos = list(row_idx.values())
+        n_rows = len(keys)
+        next_key: list[str | None] = [None] * (n_rows + 1)
+        seq = 0
+        for n in nodes:
+            if n.kind == "row":
+                for m in nodes[row_idx[id(n)] + 1 :]:
+                    if m.kind == "row":
+                        next_key[seq] = _anchor_key(m)
+                        break
+                seq += 1
         out: list[list[Node]] = []
         cur: list[Node] = []
+        has_decorated = any(
+            _is_decorated_anchor(n) for n in nodes if n.kind == "row"
+        )
+        seq = 0
         for n in nodes:
-            if n.kind == "row" and counts.get(_anchor_key(n)) == 1 and cur:
+            if n.kind != "row":
+                cur.append(n)
+                continue
+            k = _anchor_key(n)
+            nxt = next_key[seq]
+            if has_decorated:
+                is_anchor = bool(cur) and _is_decorated_anchor(n)
+            else:
+                is_anchor = (
+                    bool(cur)
+                    and counts.get(k) == 1
+                    and (
+                        seq + 1 < n_rows
+                        and nxt is not None
+                        and counts.get(nxt, 0) > 1
+                    )
+                )
+            if is_anchor:
                 out.append(cur)
                 cur = []
             cur.append(n)
+            seq += 1
         if cur:
             out.append(cur)
         return out
@@ -349,21 +408,110 @@ def _align_grouped_rows(old: list[Node], new: list[Node]) -> list[Edit] | None:
         b=[_anchor_key(b[0]) for b in new_blocks],
         autojunk=False,
     )
+
+    def block_matches(
+        sm_blocks: list,
+    ) -> list[tuple[int, int]]:
+        """Pairs of (old_index, new_index) of matched groups.
+
+        SequenceMatcher pairs only the longest IN-ORDER runs: a group
+        moved to the other end of the table stays unpaired and would
+        retire + re-add wholesale - the emitter's keyed row pairing
+        then merges attribute rows of unrelated groups (the moved
+        group's ``units`` into another group's anchor block). Groups
+        that exist uniquely on each side with the same anchor key
+        are the SAME group however far it moved: pair the leftovers
+        too, keyed by anchor, using the first unused same-key block
+        on the other side.
+        """
+        from collections import Counter
+
+        old_counts = Counter(_anchor_key(b[0]) for b in old_blocks)
+        new_counts = Counter(_anchor_key(b[0]) for b in new_blocks)
+
+        # in-order longest-run pairs SequenceMatcher found; the SM
+        # pairing is a function i -> j and each j pairs at most one
+        # i, so a dict is safe here
+        pairs: dict[int, int] = {}
+        for mb in sm_blocks[:-1]:  # last block is the (0,0,0) sentinel
+            for i in range(mb.size):
+                # guard: an OLD block can sit in several SM blocks
+                # when its key repeats (e.g. duplicate group anchors
+                # across joined sub-tables) - keep the FIRST pairing
+                if mb.a + i not in pairs:
+                    pairs[mb.a + i] = mb.b + i
+
+        # leftover move-pairing, keyed by unique anchor on both
+        # sides, in new-document order
+        new_matched = set(pairs.values())
+        for j, nb in enumerate(new_blocks):
+            if j in new_matched:
+                continue
+            k = _anchor_key(nb[0])
+            if new_counts[k] != 1 or old_counts[k] != 1:
+                # ambiguous or unmatched key: leave it for gap
+                # retirement / insertion
+                continue
+            for i, ob in enumerate(old_blocks):
+                if i not in pairs and _anchor_key(ob[0]) == k:
+                    pairs[i] = j
+                    break
+        return sorted(pairs.items())
+
     edits: list[Edit] = []
-    matched = 0
-    prev_a = prev_b = 0
-    for block in sm.get_matching_blocks():
-        # gap: whole old-only groups retire, then new-only groups add
-        edits.extend(Delete(old=n) for b in old_blocks[prev_a : block.a] for n in b)
-        edits.extend(Insert(new=n) for b in new_blocks[prev_b : block.b] for n in b)
-        for ob, nb in zip(old_blocks[block.a : block.a + block.size],
-                          new_blocks[block.b : block.b + block.size]):
-            edits.extend(_align_rows_within_group(ob, nb))
-            matched += 1
-        prev_a, prev_b = block.a + block.size, block.b + block.size
-    edits.extend(Delete(old=n) for b in old_blocks[prev_a:] for n in b)
-    edits.extend(Insert(new=n) for b in new_blocks[prev_b:] for n in b)
-    if matched < 2:
+    matched_pairs = block_matches(sm.get_matching_blocks())
+    matched_old = {i for i, _ in matched_pairs}
+
+    # emit in NEW document order so the rendered table follows the
+    # new revision's grouping. Movement makes the matched pairs'
+    # new indices non-monotonic (they are sorted by OLD index), so
+    # a naive ``range(prev_new + 1, j)`` gap insert would re-emit
+    # blocks from ranges already covered by an earlier, larger j -
+    # track the high-water mark and never go back.
+    def _tag(edits_: list[Edit], group: int) -> list[Edit]:
+        # stamp the group id on every edit: the emitter uses it to
+        # scope same-key row pairing to one variable's rows instead
+        # of inferring group boundaries from edit order (fragile -
+        # a group's deletes and inserts interleave variably)
+        return [
+            _dc_replace(e, group=group) if e.group is None else e
+            for e in edits_
+        ]
+
+    remaining_old = [i for i in range(len(old_blocks)) if i not in matched_old]
+    paired_new = {j for _, j in matched_pairs}
+    prev_new = -1
+    for i, j in matched_pairs:
+        # retire old-only groups positioned before this matched
+        # group's old index
+        for r in list(remaining_old):
+            if r < i:
+                edits.extend(
+                    _tag([Delete(old=n) for n in old_blocks[r]], ("old", r))
+                )
+                remaining_old.remove(r)
+        # insert new-only groups that precede this matched block in
+        # new-document order and were never paired
+        for k in range(prev_new + 1, j):
+            if k not in paired_new:
+                edits.extend(
+                    _tag([Insert(new=n) for n in new_blocks[k]], ("new", k))
+                )
+        prev_new = max(prev_new, j)
+        edits.extend(
+            _tag(
+                _align_rows_within_group(old_blocks[i], new_blocks[j]),
+                ("old", i),
+            )
+        )
+    for k in range(prev_new + 1, len(new_blocks)):
+        if k not in paired_new:
+            edits.extend(
+                _tag([Insert(new=n) for n in new_blocks[k]], ("new", k))
+            )
+    for r in remaining_old:
+        edits.extend(_tag([Delete(old=n) for n in old_blocks[r]], ("old", r)))
+    if len(matched_pairs) < 2:
         return None  # nothing group-like matched: keep plain alignment
     return edits
 

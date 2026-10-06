@@ -731,3 +731,290 @@ class TestGroupedRowPairing:
         assert "\\DIFadd" not in retired, (
             "retired group's rows are entangled with inserted rows"
         )
+
+
+class TestGroupedPairingRegressions:
+    """Regressions pinned from the rendered grouped-table pipeline.
+
+    Each test reproduces a concrete mis-merge observed on a
+    generated variable/attribute table diff: attribute rows merged
+    across group boundaries, duplicated, or wholesale-retired even
+    though a same-group counterpart existed. All of them share the
+    TestGroupedRowPairing table scaffold (lightcyan + textbf
+    variable anchors, plain attribute rows).
+    """
+
+    # ---- scaffold (same conventions as TestGroupedRowPairing) ----
+
+    @staticmethod
+    def _doc(rows: str) -> str:
+        return (
+            "\\documentclass{article}\n\\usepackage{longtable}\n"
+            "\\begin{document}\n"
+            "\\begin{longtable}{lllll}\n"
+            "\\hline\n\\rowcolor{lightgray} \\textbf{Name} & "
+            "\\textbf{Desc} & \\textbf{Type} & \\textbf{Value} & "
+            "\\textbf{Dims}\\\\\n\\hline\n\\endfirsthead\n\\endfoot\n\\endlastfoot\n"
+            + rows
+            + "\\hline\n\\end{longtable}\n\\end{document}\n"
+        )
+
+    @staticmethod
+    def _old_coord(name: str, desc: str, unit: str) -> str:
+        # the old-style coordinate group: 6 rows, anchor first
+        return (
+            f"\\rowcolor{{lightcyan}} \\textbf{{{name}}} & {desc} & float"
+            f" & vr & d1 \\\\\n\\hline\n"
+            "long\\_name & Variable long name & string & See & \\\\\n\\hline\n"
+            f"units & Physical units & string & {unit} & \\\\\n\\hline\n"
+            "valid\\_min & Valid minimum & float & -9.9e+36 & \\\\\n\\hline\n"
+            "valid\\_max & Valid maximum & float & 9.9e+36 & \\\\\n\\hline\n"
+            "\\_FillValue & Missing value & float & 9.9e+36 & \\\\\n\\hline\n"
+        )
+
+    @staticmethod
+    def _new_coord(name: str, desc: str) -> str:
+        # the new-style coordinate group: 2 rows, anchor + _FillValue
+        return (
+            f"\\rowcolor{{lightcyan}} \\textbf{{{name}}} & {desc} & float"
+            f" & vr & {name} \\\\\n\\hline\n"
+            "\\_FillValue & Missing value & float & -1.1e-38 & \\\\\n\\hline\n"
+        )
+
+    @staticmethod
+    def _old_group(name: str, unit: str) -> str:
+        return TestGroupedRowPairing._old_group(name, unit)
+
+    @staticmethod
+    def _new_group(name: str) -> str:
+        return TestGroupedRowPairing._new_group(name)
+
+    # ---- regressions ----
+
+    def test_moved_match_group_fill_value_merges_in_own_group(self):
+        """lev case: matched means-scoped anchor + guides killer.
+
+        A moved/rewritten group whose anchor appears as Delete AND
+        Insert must not lose barrier status: the NEXT group's
+        retired ``_FillValue`` must not merge with this group's
+        inserted ``_FillValue``, and this group's own value change
+        must render inside its own rows (before the next group's
+        anchor), not after them.
+        """
+        old = (
+            self._old_coord("lev", "Model levels", "")
+            + self._old_coord("lev\\-\\_2", "Retired levels", "")
+            + self._old_group("tmem", "s")
+        )
+        new = (
+            self._new_coord("lev", "Model levels")
+            + self._new_coord("tmem", "Model time")
+        )
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # lev's _FillValue value change merges within the lev group:
+        # struck old value and blue new value in ONE row that
+        # appears BEFORE the retired lev_2 anchor
+        i_merge = out.find("\\DIFdel{9.9e+36}")
+        assert i_merge != -1, "lev FillValue change not merged"
+        i_lev2 = out.find("lev\\-\\_\\allowbreak 2")
+        assert i_lev2 != -1
+        assert i_merge < i_lev2, (
+            "fill-value merge rendered after the retired lev_2 anchor"
+        )
+        # the retired lev_2 group must NOT absorb a blue fill value
+        retired = out[i_lev2 : out.find("tmem", i_lev2)]
+        assert "DIFadd{-1.1e-38}" not in retired
+
+    def test_inserted_new_group_rows_not_merged_into_retired_group(self):
+        """cloud_optical_thickness / lat2 case.
+
+        A retired group followed by whole-brand-new groups
+        (no old counterpart): the retired group's ``_FillValue``
+        delete must stay fully struck - it must not pair with the
+        new group's ``_FillValue`` insert that follows it.
+        """
+        old = (
+            self._old_group("cloud\\-\\_op", "")
+            + self._old_coord("old\\-\\_aux", "Aux", "Pa")
+        )
+        new = (
+            self._new_coord("lat2", "Latitude 2")
+            + self._new_coord("lon2", "Longitude 2")
+        )
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # the retired cloud group retires wholesale: its rows are
+        # all fully struck - no merged row pairs its ``_FillValue``
+        # with the inserted lat2 group's fill value. A cross-group
+        # merge shows up as a plain-key fill-value row carrying
+        # BOTH the struck old and blue new value; the retired rows
+        # instead render the WHOLE row struck (key included).
+        import re
+
+        merged_fill = re.findall(
+            r"FillValue & Missing value & float &"
+            r"\\DIFdelbegin \\DIFdel\{9\.9e\+36\}",
+            out,
+        )
+        assert len(merged_fill) == 1, (
+            f"expected exactly one merged fill-value row (lat2's), "
+            f"got {len(merged_fill)}"
+        )
+        struck_fill = re.findall(
+            r"\\DIFdel\{\\_\\allowbreak FillValue\}", out
+        )
+        assert struck_fill, "retired cloud group lost its struck rows"
+        # the retired group's struck fill row must not contain a
+        # blue value on the same source line as the struck one
+        for m in re.finditer(
+            r"\\DIFdel\{\\_\\allowbreak FillValue\}[^\\n]*", out
+        ):
+            assert "\\DIFadd" not in m.group(0), (
+                "retired fill-value row was merged with a new group's insert"
+            )
+
+    def test_insert_first_group_merges_attributes(self):
+        """surface_pressure case: insert-first emission order.
+
+        A rewritten group can emit its INSERT rows first and its
+        old attribute DELETES after; the pre-pass must pair them
+        anyway or the attribute renders twice (blue insert + struck
+        retire) with no in-place merge.
+        """
+        old = self._old_group("press", "Pa") + self._old_group("geo", "m2 s-2")
+        new = self._new_group("press") + self._new_group("geo")
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # units merged in place: struck Pa and blue - in ONE row
+        i_pa = out.find("\\DIFdel{Pa}")
+        i_dash = out.find("\\DIFadd{-}")
+        assert i_pa != -1 and i_dash != -1
+        # the units row renders once, merged - no duplicate retired
+        # copy of the units row after the merged one. The retired
+        # copy would carry a struck "Physical units" cell while the
+        # merged copy keeps it plain: count plain occurrences of the
+        # attribute text spanning old groups.
+        assert out.count("Physical units") == 2  # one per group, merged
+        # _FillValue merged in the same way
+        merged_rows = [
+            m.start()
+            for m in __import__("re").finditer(r"\\_FillValue & Missing", out)
+        ]
+        assert len(merged_rows) == 2  # one per group, not one per side
+
+    def test_one_off_attribute_does_not_split_group(self):
+        """chlor_a case: unique-key attribute as false anchor.
+
+        A group holding an attribute no other group repeats
+        (chlor_a's scale_factor) must stay ONE group: its units row
+        pairs with the new units row (in-place value merge) instead
+        of wholesale retire + re-add.
+        """
+        old = (
+            "\\rowcolor{lightcyan} \\textbf{chl\\-\\_a} & Chlorophyll & float"
+            " & vr & d1,d2 \\\\\n\\hline\n"
+            "long\\_name & Variable long name & string & See & \\\\\n\\hline\n"
+            "units & Physical units & string & mg m-3 & \\\\\n\\hline\n"
+            "scale\\_factor & Scale factor & float & 1 & \\\\\n\\hline\n"
+            "valid\\_max & Valid maximum & float & 1000 & \\\\\n\\hline\n"
+            "\\_FillValue & Missing value & float & 9.9e+36 & \\\\\n\\hline\n"
+        ) + self._old_group("var\\-\\_next", "Pa")
+        new = (
+            "\\rowcolor{lightcyan} \\textbf{chl\\-\\_a} & Chlorophyll & float"
+            " & vr & lat,lon \\\\\n\\hline\n"
+            "long\\_name & Variable long name & string & See & \\\\\n\\hline\n"
+            "units & Physical units & string & milligram m-3 & \\\\\n\\hline\n"
+            "scale\\_factor & Scale factor & double & 1 & \\\\\n\\hline\n"
+            "valid\\_range & Valid range & float & 0 to 1000 & \\\\\n\\hline\n"
+            "\\_FillValue & Missing value & float & -1.1e-38 & \\\\\n\\hline\n"
+        ) + self._new_group("var\\-\\_next")
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # the units value changed in place (merge), not retire+re-add
+        assert "\\DIFdel{mg m-3}" in out
+        assert "\\DIFadd{milligram m-3}" in out
+        # a wholesale re-add would strike the WHOLE units row: the
+        # plain "Physical units" cells of the group render once
+        i_del = out.find("\\DIFdel{mg m-3}")
+        i_add = out.find("\\DIFadd{milligram m-3}")
+        # merged row: plain key cell stays plain
+        assert i_add != -1 and i_del != -1 and i_del < i_add
+
+    def test_truncated_anchor_group_retires_wholesale(self):
+        """organic-matter case: like-named truncated anchor.
+
+        An old group whose anchor text differs from the new group's
+        (truncated/renamed, e.g. ``...mater`` vs ``...matter``):
+        the old group must retire wholesale with NO merged blue
+        attribute rows inside it (the duplicate black
+        units/_FillValue merge-row confusion).
+        """
+        old = (
+            self._old_group("hyd\\-\\_org\\-\\_mater", "kg kg-1")
+            + self._old_group("hyd\\-\\_ph\\-\\_org\\-\\_matter", "kg kg-1")
+            + self._old_group("sulf", "kg kg-1")
+        )
+        new = (
+            self._new_group("hyd\\-\\_org\\-\\_matter")
+            + self._new_group("hyd\\-\\_ph\\-\\_org\\-\\_matter")
+            + self._new_group("sulf")
+        )
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # the retired truncated group: no blue inserted rows inside
+        # (struck anchors render allowbreak-wrapped)
+        import re
+
+        i_ret = out.find("org\\-\\_\\allowbreak mater}}")
+        assert i_ret != -1, "truncated-anchor group did not retire"
+        # the retired block runs to the next group's anchor row
+        # (matched phobic group renders \textbf{hyd\-\_ph\-\_...})
+        m_next = re.search(
+            r"\\textbf\{hyd\\-\\_ph", out[i_ret:]
+        )
+        assert m_next is not None
+        retired = out[i_ret : i_ret + m_next.start()]
+        # the retire run itself must end before the wholesale insert of
+        # the matched new group (\DIFaddbegin) — a merged row would
+        # place \DIFadd INSIDE the retire run, i.e. before it
+        first_add = retired.find("\\DIFaddbegin")
+        assert first_add != -1 and "\\DIFadd" not in retired[:first_add], (
+            "retired truncated group absorbed merged rows of the new group"
+        )
+
+    def test_group_tags_pin_interleaved_group_alignment(self):
+        """Renders of interleaved groups stay pair-scoped (tags).
+
+        The group tag stamped by the grouped-row aligner scopes
+        same-key pairing exactly: with two rewritten groups where
+        alignments interleave deletes and inserts heavily, every
+        merged units value must sit inside its own group's rows.
+        """
+        # two groups, both rewritten, both with same attribute keys
+        old = self._old_group("gg\\-\\_one", "Pa") + self._old_group(
+            "gg\\-\\_two", "K"
+        )
+        new = self._new_group("gg\\-\\_one") + self._new_group("gg\\-\\_two")
+        out = diff_documents(self._doc(old), self._doc(new), inject_preamble=False).marked_up
+        # both groups' _FillValue merge exactly once each: a merged
+        # row keeps a plain key cell and carries both values; a
+        # retire+re-add pair would render the row twice (once fully
+        # struck, once fully blue) instead
+        import re
+
+        merged_fill = re.findall(
+            r"FillValue & Missing value & float &"
+            r"\\DIFdelbegin \\DIFdel\{9\.9e\+36\}",
+            out,
+        )
+        assert len(merged_fill) == 2, (
+            f"expected 2 merged fill-value rows, got {len(merged_fill)}"
+        )
+        # struck units values stay inside their own groups (same
+        # nearest-anchor discipline as the reorder test)
+        for unit, name in (("Pa", "one"), ("K", "two")):
+            i_unit = out.find(f"\\DIFdel{{{unit}}}")
+            assert i_unit != -1, f"missing struck {unit}"
+            before = out[:i_unit]
+            nearest = max(
+                before.rfind(t) for t in ("gg\\-\\_one", "gg\\-\\_two")
+            )
+            assert name in out[nearest : nearest + 12], (
+                f"{unit} merged into the wrong group"
+            )

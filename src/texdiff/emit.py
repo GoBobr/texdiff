@@ -1563,14 +1563,91 @@ def _segment_ids(edits: list[Edit]) -> list[int]:
     """
     from collections import Counter
 
+    # Preferred: group tags stamped by the grouped-row aligner -
+    # exact ground truth for which variable's rows an edit belongs
+    # to, immune to the variable interleaving of deletes/inserts
+    # within a group. Matched groups share one tag on both sides
+    # (the old block index); retired and inserted groups carry
+    # old-/new-namespaced tags that never collide. Untagged edits
+    # (plain alignment path) fall through to the anchor-key
+    # inference below.
+    tags = [getattr(e, "group", None) for e in edits]
+    if any(t is not None for t in tags):
+        remap: dict[object, int] = {}
+        return [remap.setdefault(t, len(remap)) for t in tags]
     keys = [_row_key_of(e) for e in edits]
-    counts = Counter(k for k in keys if k)
-    seg = []
+    del_counts: Counter[str] = Counter()
+    ins_counts: Counter[str] = Counter()
+    for e, k in zip(edits, keys):
+        if not k:
+            continue
+        if isinstance(e, Insert):
+            ins_counts[k] += 1
+        else:
+            del_counts[k] += 1
+    # A segment is one variable's row GROUP in a grouped
+    # variable/attribute table. Anchors (keys unique on their side)
+    # delimit them - but pooling both sides into one counter was
+    # wrong twice over: a rewritten group anchor (Delete + Insert of
+    # the same key, pooled count 2) stopped being a barrier and
+    # pairing crossed group boundaries. Instead:
+    # - a Delete/Match anchor starts a NEW segment;
+    # - an Insert anchor whose key also anchors an old-side segment
+    #   REOPENS that segment (the two anchor rows are the same
+    #   group, rewritten in place - their attribute rows pair);
+    # - an Insert anchor with no old-side counterpart (a brand-new
+    #   group) also starts a new segment so its attribute inserts
+    #   never pair into a retired group's attribute deletes.
+    # The aligner emits a group's rows as one contiguous run per
+    # side, but the anchor may sit anywhere INSIDE its run (deletes
+    # may lead or trail it) - a single anchor in a run therefore
+    # covers the whole run; multiple anchors split at each.
+    seg = [0] * len(edits)
     current = 0
-    for k in keys:
-        if k and counts[k] == 1:
-            current += 1  # barrier: unique-key row starts a new segment
-        seg.append(current)
+    anchor_seg: dict[str, int] = {}
+
+    def _del_is_anchor(k: str | None) -> bool:
+        return bool(k) and del_counts.get(k) == 1
+
+    def _ins_is_anchor(k: str | None) -> bool:
+        return bool(k) and ins_counts.get(k) == 1
+
+    # maximal runs of consecutive same-side edits (Insert vs other)
+    runs: list[tuple[int, int, bool]] = []  # (start, stop, is_insert)
+    i = 0
+    while i < len(edits):
+        is_ins = isinstance(edits[i], Insert)
+        j = i
+        while j < len(edits) and isinstance(edits[j], Insert) == is_ins:
+            j += 1
+        runs.append((i, j, is_ins))
+        i = j
+
+    for start, stop, is_ins in runs:
+        is_anchor = _ins_is_anchor if is_ins else _del_is_anchor
+        anchor_pos = [p for p in range(start, stop) if is_anchor(keys[p])]
+        if len(anchor_pos) == 1 and stop - start > 1:
+            # one anchor inside its run: the run is one group
+            a = keys[anchor_pos[0]]
+            if is_ins and a in anchor_seg:
+                s = anchor_seg[a]  # rewritten group: reopen its segment
+            else:
+                current += 1
+                if a is not None:
+                    anchor_seg.setdefault(a, current)
+                s = current
+            seg[start:stop] = [s] * (stop - start)
+        else:
+            for p in range(start, stop):
+                if is_anchor(keys[p]):
+                    a = keys[p]
+                    if is_ins and a in anchor_seg:
+                        current = anchor_seg[a]
+                    else:
+                        current += 1
+                        if a is not None:
+                            anchor_seg.setdefault(a, current)
+                seg[p] = current
     return seg
 
 
@@ -1593,6 +1670,18 @@ def _group_keyed_row_pairs(edits: list[Edit]) -> list[Edit]:
     unique-key barrier row.
     """
     seg = _segment_ids(edits)
+    from collections import Counter
+
+    del_counts: Counter[str] = Counter()
+    ins_counts: Counter[str] = Counter()
+    for e in edits:
+        k = _row_key_of(e)
+        if not k:
+            continue
+        if isinstance(e, Insert):
+            ins_counts[k] += 1
+        else:
+            del_counts[k] += 1
     used_ins: set[int] = set()
 
     def partner(d_seg: int, d: Delete, seq: list[tuple[Edit, int]]) -> int | None:
@@ -1604,8 +1693,47 @@ def _group_keyed_row_pairs(edits: list[Edit]) -> list[Edit]:
             if not isinstance(cand, Insert) or cand.new.kind != "row":
                 continue
             if c_seg != d_seg:
+                # a rewritten ANCHOR (a variable row whose key is
+                # unique on both sides - each one a barrier that
+                # starts its own segment) still pairs with its
+                # same-key counterpart: the aligned group pair the
+                # aligner matched, rendered in-place as a merge.
+                # Attribute rows (repeated keys) never cross.
+                dk = _row_key_of(d)
+                if (
+                    dk
+                    and del_counts.get(dk, 0) == 1
+                    and ins_counts.get(dk, 0) == 1
+                    and _keyed_equality(d, cand)
+                    and dk == _row_key_of(cand)
+                ):
+                    return j
                 continue
             if _keyed_equality(d, cand):
+                return j
+        return None
+
+    def del_partner(
+        i_seg: int, ins: Insert, seq: list[tuple[Edit, int]]
+    ) -> int | None:
+        """Mirror of :func:`partner` for insert-first runs.
+
+        A rewritten group can emit its INSERTS first (new rows of
+        the group) and its attribute DELETES afterwards. Consuming
+        head-first pairs nothing - the inserts render wholesale and
+        their deletes retire wholesale, duplicating attribute rows
+        (``units`` / ``_FillValue`` shown twice in one group).
+        """
+        if ins.new.kind != "row":
+            return None
+        for j, (cand, c_seg) in enumerate(seq):
+            if cand is ins:
+                continue
+            if not isinstance(cand, Delete) or cand.old.kind != "row":
+                continue
+            if c_seg != i_seg:
+                continue
+            if _keyed_equality(cand, ins):
                 return j
         return None
 
@@ -1621,6 +1749,16 @@ def _group_keyed_row_pairs(edits: list[Edit]) -> list[Edit]:
                 # adjacency achieved at the delete's position
                 result.extend([e, ins])
                 used_ins.add(id(ins))
+                seq = rest
+                continue
+        if isinstance(e, Insert):
+            j = del_partner(e_seg, e, seq)
+            if j is not None:
+                dele = seq[j][0]
+                rest = [x for k, x in enumerate(seq) if k not in (0, j)]
+                # adjacency achieved at the insert's position
+                result.extend([dele, e])
+                used_ins.add(id(e))
                 seq = rest
                 continue
         result.append(e)
@@ -1840,16 +1978,17 @@ def _find_key_partner(
     old_cells = _row_key_cells(delete.old.text)
     if len(old_cells) < 2:
         return None
-    counts = Counter(
-        k
-        for k in (_row_key_of(e) for e in edits)
-        if k
-    )
+    # per-segment barrier via _segment_ids: the scan stops at the
+    # first row of another group (an old-side anchor row, or the
+    # inserts of a rewritten/new group). Pooling both sides into
+    # one uniqueness counter mis-classified rewritten anchors
+    # (Delete + Insert of the same key, pooled count 2) as
+    # non-barriers and let pairing merge rows across groups.
+    seg = _segment_ids(edits)
     for j in range(start, min(start + _KEY_PARTNER_WINDOW, len(edits))):
         cand = edits[j]
-        k = _row_key_of(cand)
-        if k and counts[k] == 1:
-            break  # group barrier: no partner beyond the group's rows
+        if seg[j] != seg[start - 1]:
+            break  # group boundary: no partner beyond the group's rows
         if not isinstance(cand, Insert) or cand.new.kind != "row":
             continue
         if _keyed_equality(delete, cand):
