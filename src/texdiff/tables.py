@@ -146,7 +146,13 @@ def _strike_word(word: str) -> str:
             if depth:
                 out.append("}")
                 depth -= 1
-            out.append(piece + "\\allowbreak ")
+            # a literal (unescaped) ``_`` arrives here as a
+            # breakpoint piece; emitted bare it typesets as a math
+            # subscript OUTSIDE the strike - unbreakable, and it
+            # pushes the row into the neighbouring cell. Emit the
+            # escaped form, which is both breakable and safe text.
+            bp = "\\_" if piece == "_" else piece
+            out.append(bp + "\\allowbreak ")
             out.append("\\sout{")
             depth += 1
         else:
@@ -308,6 +314,78 @@ def is_pathological(old_text: str, new_text: str) -> bool:
         return False
     ratio = SequenceMatcher(a=wo, b=wn, autojunk=False).ratio()
     return ratio < PATHOLOGICAL_WORD_SIMILARITY
+
+
+# first data cell of a row, bracket/brace aware, macro lead stripped
+def _first_cell(row: str) -> str:
+    """Normalized first cell (the row's key) of a table row line."""
+    # drop the row terminator and any rowcolor/hline lead
+    r = re.sub(r"\\\\\s*$", "", row)
+    r = re.sub(r"^\\(?:rowcolor\s*\{[^{}]*\}|hline|cline\s*\{[^{}]*\})\s*", "", r.strip())
+    cell = []
+    depth = 0
+    i = 0
+    while i < len(r):
+        c = r[i]
+        if c == "\\" and i + 1 < len(r):
+            cell.append(r[i : i + 2])
+            i += 2
+            continue
+        if c == "&" and depth == 0:
+            break
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        cell.append(c)
+        i += 1
+    key = "".join(cell)
+    # unwrap \textbf{...}/\emph{...}/\texttt{...} wrappers so a
+    # labelled row equals its plain form
+    m = re.fullmatch(r"\\(?:textbf|emph|texttt|textit)\{(.*)\}", key, re.S)
+    if m:
+        key = m.group(1)
+    return re.sub(r"\s+", " ", key.replace("\\_", "_")).strip()
+
+
+def rows_pair_by_key(old_text: str, new_text: str, min_frac: float = 0.5) -> bool:
+    """True when the data rows of two tables pair by first-cell key.
+
+    Regenerated spec tables rewrite whole attribute cells (a new NCML
+    generation changes type names, shapes and every attribute), so
+    word similarity collapses and the pair looks mutually
+    unrecognizable - while the logical row structure (one row per
+    variable: ``lat``, ``lon``, ``crs``, ...) is intact. When at least
+    ``min_frac`` of the smaller side's rows have a first cell that
+    also appears as a first cell on the other side, the table is the
+    SAME table with edited cells: inline row markup (red struck cell,
+    blue replacement right after) reads far better than retiring the
+    whole table and reintroducing it blue.
+    """
+    lo = [
+        _first_cell(r)
+        for r in _data_row_lines(old_text)
+        if _first_cell(r)
+    ]
+    ln = [
+        _first_cell(r)
+        for r in _data_row_lines(new_text)
+        if _first_cell(r)
+    ]
+    if not lo or not ln:
+        return False
+    # structural repeats (header rows repeated via \endhead) must not
+    # count twice per side
+    lo, ln = set(lo), set(ln)
+    # grid renames (NPP_Grid_IMG_2D -> VIIRS_Grid_IMG_2D) change the
+    # path prefix of every HDF-EOS field row without touching the
+    # data field itself: rows also pair when their last path
+    # component matches
+    def _last(k: str) -> str:
+        return k.rsplit("/", 1)[-1] if "/" in k else k
+    lo_last, ln_last = {_last(k) for k in lo}, {_last(k) for k in ln}
+    shared = len(lo_last & ln_last)
+    return shared >= min_frac * min(len(lo_last), len(ln_last)) and shared >= 2
 
 
 _SPEC_RE = re.compile(r"\\begin\{longtable\*?\}\s*\{")

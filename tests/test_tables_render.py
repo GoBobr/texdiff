@@ -259,6 +259,29 @@ class TestEmitWiring:
 class TestRetiredTablePolicy:
     """Old-then-new ordering, shared numbering for replaced tables."""
 
+    def test_punctuation_delete_leads_inserted_block(self):
+        """A stranded sentence-final period must lead the add region."""
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "Some sentence referencing \\hyperlink{doc:ADS}{[ADS]}.\n"
+            "\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "Some sentence referencing \\hyperlink{doc:SPEC}{[SPEC]}.\n"
+            "Note: schemas are generated in the format definition\n"
+            "repository (\\texttt{xml-definitions})\n"
+            ") and shipped with the processor.\n"
+            "\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        if r"\DIFdel{.}" in out:
+            # if present, the struck dot must come BEFORE the blue
+            # replacement text - at the start of the block, not after it
+            del_pos = out.index(r"\DIFdel{.}")
+            add_pos = out.index(r"\DIFaddbegin")
+            assert del_pos < add_pos
+
     def test_retired_table_precedes_inserted_replacement(self):
         # insert-first alignment: the new table's Edit comes before
         # the old table's Delete; the render must still emit the
@@ -316,9 +339,237 @@ class TestRetiredTablePolicy:
         assert "\\sout{sales figures}" in struck
         assert "\\addtocounter{table}{-1}" in struck
 
+    def test_retired_table_precedes_inserted_metadata_and_data_tables(self):
+        # GitHub #1: a region where the new revision gained a
+        # metadata ("Global dimensions") table BEFORE its (slightly
+        # changed) data table: the Insert queues up before the
+        # table-replacement Modify and the retiring Modify must hoist
+        # above the WHOLE queue so the struck old data table
+        # precedes the blue Global-dimensions table
+        dims = (
+            "\\begin{longtable}{ll}\n\\caption{Global dimensions}\n"
+            "dim & 1\\\\\n\\end{longtable}\n"
+        )
+        rows_old = "\n".join(f"old{i} & v{i}\\\\" for i in range(6))
+        rows_new = "\n".join(f"old{i} & w{i}\\\\" for i in range(6))
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            f"\\begin{{longtable}}{{ll}}\n\\caption{{data table}}\n"
+            f"{rows_old}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            + dims
+            + f"\\begin{{longtable}}{{ll}}\n\\caption{{data table}}\n"
+            f"{rows_new}\n\\end{{longtable}}\n"
+            "\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        i_dims = out.find("Global dimensions")
+        assert i_dims >= 0, "inserted dimensions table lost"
+        # the old data table content must render (struck, or inline
+        # per-cell marks when the delete/insert pair up by row key)
+        # BEFORE the inserted metadata table
+        i_stuck = out.find("\\sout")
+        i_inline = out.find("old0")
+        first_old = min(x for x in (i_stuck, i_inline) if x >= 0)
+        assert first_old >= 0 and first_old < i_dims, (
+            "retired table must precede the inserted metadata table"
+        )
+
+    def test_unrelated_adjacent_delete_insert_rows_stay_separate(self):
+        # GitHub #1 follow-up (scene ADS LSA table): a deleted
+        # variable row followed by an unrelated inserted attribute
+        # row must NOT merge into one logical row. Rows are single
+        # lines sharing only \hline after normalisation, which used
+        # to satisfy the 35%-shared-line test and silently drop the
+        # old row's content (kiso_445 "appeared out of the blue")
+        old_row = (
+            "\\rowcolor{lightcyan} \\textbf{kiso\\-\\_445} & "
+            "BRDF parameter kiso at 445 nm. & short & "
+            "\\emph{valid\\_min} to \\emph{valid\\_max} & dim1, dim1\\\\"
+        )
+        new_row = (
+            "\\rowcolor{lightcyan} \\textbf{kiso\\-\\_445} & "
+            "VIIRS BRDF albedo parameter kiso_445 & short & "
+            "\\emph{valid\\_min} to \\emph{valid\\_max} & lat, lon\\\\"
+        )
+        other_row = "coordinates & Coordinate variables (CF) & string & lat lon & \\\\"
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{longtable}{lllll}\n"
+            "name & desc & type & range & dims\\\\\n"
+            + old_row + "\n\\end{longtable}\n\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{longtable}{lllll}\n"
+            "name & desc & type & range & dims\\\\\n"
+            + other_row + "\n" + new_row
+            + "\n\\end{longtable}\n\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        # the old row content must survive visibly (struck), not be
+        # commented away into nothing
+        assert "BRDF parameter kiso at 445 nm" in out
+        assert "\\DIFdel{BRDF parameter kiso at 445 nm.}" in out
+        # new content present too
+        assert "VIIRS BRDF albedo parameter kiso_445" in out
+
+    def test_typo_level_row_rewrite_still_merges(self):
+        # genuinely similar rows (same logical row, small fix) keep
+        # the single merged-row treatment
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{longtable}{ll}\n\\caption{vars}\\\\\n"
+            "a & Inpu variable\\\\\n\\end{longtable}\n\\end{document}\n"
+        )
+        new_src = old_src.replace("Inpu", "Input")
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        # one row carrying both marks (single-line rows merge at
+        # cell level), not a deleted + re-added pair
+        assert "\\DIFdel{Inpu variable}" in out
+        assert "\\DIFadd{Input variable}" in out
+        assert out.count("Inpu variable") == 1
+
+    def test_keyed_row_pair_merges_across_intervening_rows(self):
+        # a deleted attribute row (units) whose inserted counterpart
+        # sits several edits away - the reordered variable row
+        # changed in between - renders as ONE row with per-cell
+        # marks.  Realistic shape: the first data row absorbs the
+        # \endfoot\endlastfoot table tail, everything before it is
+        # matched skeleton.
+        head = (
+            "\\caption{Global variables}\\\\\n"
+            "\\hline\n"
+            "\\rowcolor{lightgray} \\textbf{Variable} & \\textbf{Description} & "
+            "\\textbf{Type} & \\textbf{Range} & \\textbf{Dimensions} \\\\\n"
+            "\\hline\n\\endhead\n"
+            "\\hline\\multicolumn{5}{r}{Continued on next page} \\\\\n"
+            "\\endfoot\n\\endlastfoot\n"
+        )
+        old_row = (
+            "\\hline\\rowcolor{lightcyan} \\textbf{lat} & Latitude & float & "
+            "\\emph{valid\\_min} to \\emph{valid\\_max} & dim1, dim1\\\\\n"
+        )
+        new_row = old_row.replace("dim1, dim1", "lat, lon")
+        tail_rows = "\\hline\nunits & Physical units & string & degrees\\_north & \\\\\n"
+        tail_rows_new = tail_rows.replace("degrees\\_north", "degrees")
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "{\\scriptsize\n\\begin{longtable}{lllll}\n" + head + old_row + tail_rows +
+            "\\hline\n\\end{longtable}}\n\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "{\\scriptsize\n\\begin{longtable}{lllll}\n" + head + new_row + tail_rows_new +
+            "\\hline\n\\end{longtable}}\n\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        # the units value cell merge: old struck, new waved, in one row
+        assert "\\DIFdel{degrees\\_north}" in out
+        assert "\\DIFadd{degrees}" in out
+        # the row keys themselves are NOT struck or waved
+        assert "\\DIFdel{units}" not in out
+
+    def test_no_duplicated_endfoot_in_marked_row(self):
+        # the parse absorbs \endfoot\endlastfoot into the first data
+        # row node; when that row pair merges, the skeleton foot
+        # must be emitted exactly once and no \color may leak
+        # between \endfoot and \endlastfoot
+        head = (
+            "\\caption{Global dimensions}\\\\\n"
+            "\\hline\n"
+            "\\rowcolor{lightgray} \\textbf{Name} & \\textbf{Size} \\\\\n"
+            "\\hline\n\\endhead\n"
+            "\\hline\\multicolumn{2}{r}{Continued on next page} \\\\\n"
+            "\\endfoot\n\\endlastfoot\n"
+        )
+        old_row = "\\hline\\rowcolor{lightcyan} \\textbf{lat} & 2400\\\\\n"
+        tail_rows = "\\hline\nunits & string & degrees\\\\_north & \\\\\n"
+        new_src_base = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "{\\scriptsize\n\\begin{longtable}{ll}\n" + head + old_row + tail_rows +
+            "\\hline\n\\end{longtable}}\n\\end{document}\n"
+        )
+        old_src = new_src_base
+        new_src = new_src_base.replace(
+            "2400", "dynamic"
+        ).replace("degrees\\\\_north", "degrees")
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        assert out.count("\\endfoot") <= 1
+        # no \color between the skeleton markers
+        import re as _re
+
+        assert not _re.search(r"\\endfoot\s*\\color", out)
+        assert not _re.search(r"\\endlastfoot\s*\\color", out)
+
+    def test_retired_row_first_column_stays_visible(self):
+        # \textbf{name} in the first cell of a retired row must be
+        # struck (wrap inside the argument), not commented out
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{longtable}{ll}\n\\caption{vars}\\\\\n"
+            "\\hline\n\\rowcolor{lightcyan} \\textbf{kiso\\_445} & 0.3\\\\\n"
+            "\\hline\nunits & string & degrees & \\\\\n"
+            "\\end{longtable}\n\\end{document}\n"
+        )
+        new_src = old_src.replace("\\rowcolor{lightcyan} \\textbf{kiso\\_445} & 0.3\\\\\n", "")
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        assert out.count("kiso") == 1
+        assert "\\textbf{\\DIFdel{kiso\\_\\allowbreak 445}}" in out or (
+            "\\textbf{\\DIFdel{kiso\\_445}}" in out
+        )  # breakpoint after \_ inserted for column wrapping
+
     def test_strike_through_guarded_caption_e2e(self):
         # strike_through applies the guard to real caption lines
         struck = tables.strike_through("Grid of something:\n\\caption{Regular grid, layer and parameter}\nvar & x\\\\\n")
         assert "\\caption[]{\\texorpdfstring{\\sout{Regular grid, layer and parameter}}{}}" in struck
         # the word after the caption is still struck normally
         assert "\\sout{var}" in struck
+
+
+class TestHeadMarkerInMergedRow:
+    def test_endfirsthead_dropped_from_mid_body_merge(self):
+        # the NEW table's first data row can glue the longtable head
+        # material onto its lead ("\hline \endfirsthead \hline").
+        # When that row merges inline with an old data row, the glued
+        # \endfirsthead must not land mid-body: a second end-marker
+        # re-classifies the already-rendered rows as first-head
+        # material and longtable swallows them into one giant head
+        # (near-blank page, "Overfull \vbox ... while \output is
+        # active"). The \hline grid separators survive.
+        head = (
+            "\\caption{vars}\\\\\n"
+            "\\hline\n"
+            "\\rowcolor{lightgray} \\textbf{Variable} & \\textbf{Type} \\\\\n"
+            "\\hline\n\\endfirsthead\n"
+            "\\hline\n"
+        )
+        old_rows = (
+            "\\hline\nfoo & float32 \\\\\n"
+            "\\hline\nbar & float64 \\\\\n"
+            "\\hline\n\\end{longtable}\n"
+        )
+        # the new first data row carries the head markers in its lead
+        # (parser-glued); the rows are keyed-merged inline
+        new_rows = (
+            "\\hline \\endfirsthead \\hline\nfoo & float \\\\\n"
+            "\\hline\nbar & float \\\\\n"
+            "\\hline\n\\end{longtable}\n"
+        )
+        old_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "{\\scriptsize\n\\begin{longtable}{ll}\n" + head + old_rows + "}\n\\end{document}\n"
+        )
+        new_src = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "{\\scriptsize\n\\begin{longtable}{ll}\n" + head + new_rows + "}\n\\end{document}\n"
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        # the head marker appears exactly once: the genuine head
+        assert out.count("\\endfirsthead") == 1
+        # the grid separator of the glued lead survives
+        assert "\\DIFdel{float32}" in out
+        assert "\\DIFadd{float}" in out

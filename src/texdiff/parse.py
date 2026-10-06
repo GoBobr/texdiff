@@ -282,18 +282,19 @@ def parse_file(path: str | Path) -> list[Node]:
 def _convert(node: LatexNode, source: str) -> Node:
     """Convert one pylatexenc node (recursively) to a texdiff Node."""
     text = _span(node, source)
+    pos = node.pos
 
     if isinstance(node, LatexCharsNode):
-        return Node(kind="text", text=text, atom=True)
+        return Node(kind="text", text=text, atom=True, pos=pos)
 
     if isinstance(node, LatexCommentNode):
-        return Node(kind="comment", text=text, atom=True)
+        return Node(kind="comment", text=text, atom=True, pos=pos)
 
     if isinstance(node, LatexMathNode):
-        return Node(kind="math", text=text, atom=True)
+        return Node(kind="math", text=text, atom=True, pos=pos)
 
     if isinstance(node, LatexSpecialsNode):
-        return Node(kind="specials", text=text, atom=True)
+        return Node(kind="specials", text=text, atom=True, pos=pos)
 
     if isinstance(node, LatexGroupNode):
         return Node(
@@ -301,12 +302,13 @@ def _convert(node: LatexNode, source: str) -> Node:
             text=text,
             children=[_convert(c, source) for c in node.nodelist],
             atom=False,
+            pos=pos,
         )
 
     if isinstance(node, LatexMacroNode):
         # macros stay atomic in v0; recursable text macros (\textbf,
         # \makecell, \emph, ...) are a v1 configuration item
-        return Node(kind="macro", text=text, name=node.macroname, atom=True)
+        return Node(kind="macro", text=text, name=node.macroname, atom=True, pos=pos)
 
     if isinstance(node, LatexEnvironmentNode):
         envname = node.envname
@@ -321,6 +323,7 @@ def _convert(node: LatexNode, source: str) -> Node:
             name=envname,
             atom=not recursable,
             children=[_convert(c, source) for c in node.nodelist] if recursable else [],
+            pos=pos,
         )
 
     # unknown pylatexenc node class: keep as an opaque atomic block

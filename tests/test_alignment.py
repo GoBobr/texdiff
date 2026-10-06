@@ -123,11 +123,11 @@ def test_word_marked_line_marks_added_word_in_shared_context() -> None:
 
 
 ROW_OLD = (
-    "\\textbf{ClimL2 IPF} & \\makecell[tl]{\\swlibone} \\\\\n"
+    "\\textbf{App X} & \\makecell[tl]{\\libone} \\\\\n"
     "\\hline"
 )
 ROW_NEW = (
-    "\\textbf{ClimL2 IPF} & \\makecell[tl]{\\swlibtwo} \\\\\n"
+    "\\textbf{App X} & \\makecell[tl]{\\libtwo} \\\\\n"
     "\\hline"
 )
 
@@ -142,19 +142,19 @@ def test_render_row_region_merges_row_pair() -> None:
     out = _render_row_region(edits, markup)
     # one merged row (not a deleted row followed by an added one): a
     # single row region carrying both del and add marks
-    assert out.count("ClimL2 IPF") == 1
+    assert out.count("App X") == 1
     assert "\\DIFaddbeginFL" in out
     # the paired cell lines were marked word-by-word
-    assert "\\DIFdel{" in out and "swlibone" in out
-    assert "swlibtwo" in out
+    assert "\\DIFdel{" in out and "libone" in out
+    assert "libtwo" in out
     assert "DIFadd{" in out
 
 
 def test_render_row_pair_comments_out_old_only_lines() -> None:
     oldlines.mark_old_lines("placeholder long line for the old blob here")
     markup = LatexdiffMarkup()
-    old_row = "\\textbf{ClimL2 IPF} & \\makecell[tl]{\\swlibone} \\\\\nsecond old cell line \\\\\n\\hline"
-    new_row = "\\textbf{ClimL2 IPF} & \\makecell[tl]{\\swlibone} \\\\\nbrand new cell line content \\\\\n\\hline"
+    old_row = "\\textbf{App X} & \\makecell[tl]{\\libone} \\\\\nsecond old cell line \\\\\n\\hline"
+    new_row = "\\textbf{App X} & \\makecell[tl]{\\libone} \\\\\nbrand new cell line content \\\\\n\\hline"
     edits = [
         Delete(old=Node(kind="row", text=old_row)),
         Insert(new=Node(kind="row", text=new_row)),
@@ -175,7 +175,7 @@ def test_render_row_region_leaves_disparate_rows_separate() -> None:
     ]
     out = _render_row_region(edits, markup)
     # rows share no normalised lines: both rows rendered in full
-    assert "ClimL2 IPF" in out
+    assert "App X" in out
     assert "Unrelated" in out
 
 
@@ -266,17 +266,17 @@ def test_inserted_chapter_does_not_recolour_previous_passage() -> None:
     # SequenceMatcher longest-block greedy choice pairs the trailing
     # text with a later position; the common-prefix anchor prevents it.
     old = (
-        "\\subsubsection*{set_log}\nsee Scene L2 API section\n\n\n"
+        "\\subsubsection*{set_log}\nsee library API section\n\n\n"
         "\\newpage\n\n\\subsection{Job Order}\nOld text here.\n"
     )
     new = (
-        "\\subsubsection*{set_log}\nsee Scene L2 API section\n\n\n"
+        "\\subsubsection*{set_log}\nsee library API section\n\n\n"
         "\\newpage\n\n\\subsection{Config}\nWhole new chapter.\n\n"
         "\\newpage\n\n\\subsection{Job Order}\nOld text here.\n"
     )
     out = diff_documents(old, new).marked_up
-    # the 'see Scene L2 API section' passage stays unmarked (black)
-    assert "see Scene L2 API section\n\n\n\\newpage" in out
+    # the 'see library API section' passage stays unmarked (black)
+    assert "see library API section\n\n\n\\newpage" in out
     # ... and only the new chapter body is blue
     assert "\\DIFadd{Config}" in out
 
@@ -324,7 +324,7 @@ def test_escape_macros_fold_into_adjacent_text_nodes() -> None:
     out = diff_documents(old, new).marked_up
     assert "file type. More text." in out  # unchanged tail stays black
     assert "\\DIFdel{S7A_CO2_1A_GEO}" in out
-    assert "\\DIFadd{CO2\\_1A\\_GEO\\_\\_\\_\\_\\_\\_}" in out
+    assert "\\DIFadd{CO2\\_\\allowbreak 1A\\_\\allowbreak GEO" in out  # \_ gets \allowbreak for column wrapping
 
 
 def test_escape_folding_keeps_round_trip() -> None:

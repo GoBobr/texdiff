@@ -53,6 +53,13 @@ class Node:
     name: Optional[str] = None
     children: list[Node] = field(default_factory=list)
     atom: bool = True
+    pos: int = -1
+    """Byte offset of this node in its flattened source (-1 when the
+    node was built synthetically or the position is unknown).
+
+    Used for order decisions in emission pre-passes: unlike text
+    search, offsets disambiguate byte-identical regions (two tables
+    with the same content are still two positions)."""
 
     def walk(self) -> Iterator["Node"]:
         """Yield this node and all descendants, depth first."""

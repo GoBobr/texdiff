@@ -117,6 +117,13 @@ def diff_documents(
 
     oldlines.mark_old_lines(old_source)
 
+    # cross-revision context: the flattened NEW source, for
+    # order-sensitive pre-passes (retired-table hoisting must only
+    # swap when the NEW revision places the retirement first)
+    from . import newlines
+
+    newlines.mark_new_lines(new_source)
+
     edits = _diff_nodes(parse(body_old), parse(body_new))
     body_markup = render(edits, markup)
     stats = _count(edits) + DiffStats(preamble_changes=preamble_changes)

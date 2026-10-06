@@ -120,9 +120,10 @@ class TestRowDiff:
         old = LONGTABLE
         new = LONGTABLE.replace("float32", "float64", 1)
         r = diff_documents(old, new)
-        # changed row carries both markers...
-        assert "\\DIFdelbegin" in r.marked_up
-        assert "\\DIFaddbegin" in r.marked_up
+        # changed row carries both markers - inline (single-line
+        # rows merge at cell level: struck old cell + waved new
+        # cell, no FL block markers needed)
+        assert "\\DIFdelbegin \\DIFdel{float32}\\DIFdelend{} \\DIFadd{float64}" in r.marked_up
         # ...the untouched row does not appear inside any del region
         del_start = r.marked_up.index("\\DIFdelbegin")
         del_end = r.marked_up.index("\\DIFdelend")

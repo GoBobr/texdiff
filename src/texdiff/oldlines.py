@@ -44,6 +44,23 @@ def in_old(line: str) -> bool:
     return len(norm) >= 10 and norm in old_blob
 
 
+def in_old_line(line: str) -> bool:
+    """True when `line` matches a STANDALONE old line, not a substring.
+
+    ``in_old`` matches by substring containment so a re-emitted row
+    line whose old counterpart carries extra trailing structure
+    still counts as existing. That is too loose for colouring a
+    small fragment: a short attribute run (``\\item grid\\_mapping:
+    Projection``) sits inside many longer old attribute cells and
+    would wrongly downgrade a genuinely-added cell to black.
+    Exact standalone-line matching keeps the refine-diff intent
+    (verbatim re-emitted lines render black) without the substring
+    false positives.
+    """
+    norm = norm_line(line)
+    return len(norm) >= 10 and norm in old_lines
+
+
 def is_struct_line(line: str) -> bool:
     """Bare structure lines never take a colour declaration."""
     return bool(re.match(r"^\s*\\(?:rowcolor|hline|begin|end|caption)\b", line))
