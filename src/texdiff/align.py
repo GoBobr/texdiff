@@ -120,12 +120,17 @@ def _align_plain(old: list[Node], new: list[Node]) -> list[Edit]:
         return Modify(old=o, new=n)
 
     # 1. common prefix, paired positionally (identical to what a
-    # matching-block run does - only the anchoring is stronger)
+    # matching-block run does - only the anchoring is stronger).
+    # Wildcard signatures additionally need equal text: for them
+    # signature equality means only "same kind of node", so an
+    # inserted sibling shifts every following wildcard by one and a
+    # signature-only prefix would pair the unchanged old item with
+    # the newly inserted neighbour.
     pre = 0
     while (
         pre < len(old)
         and pre < len(new)
-        and old[pre].signature() == new[pre].signature()
+        and _anchorable(old[pre], new[pre])
     ):
         pre += 1
     # common suffix (may not overlap the prefix)
@@ -133,7 +138,9 @@ def _align_plain(old: list[Node], new: list[Node]) -> list[Edit]:
     while (
         suf < len(old) - pre
         and suf < len(new) - pre
-        and old[len(old) - 1 - suf].signature() == new[len(new) - 1 - suf].signature()
+        and _anchorable(
+            old[len(old) - 1 - suf], new[len(new) - 1 - suf]
+        )
     ):
         suf += 1
     mid_old = old[pre : len(old) - suf]
@@ -610,6 +617,31 @@ def _content_similarity(a: "Node", b: "Node") -> float:
     if len(ka) >= 3 and len(kb) >= 3:
         return len(ka & kb) / len(ka | kb)
     return _text_similarity(a.text or "", b.text or "")
+
+
+# wildcard signatures: equality means "same node kind", not
+# "counterpart" - prefix/suffix anchoring demands equal text for them
+_PLAIN_SIGS = ("text", "group", "env", "macro:label")
+
+
+def _anchorable(o: Node, n: Node) -> bool:
+    """Whether two nodes may extend the prefix/suffix anchor.
+
+    Equal signature is a real anchor for SPECIFIC signatures (macro
+    names, sectioning titles, table row keys). The wildcard
+    signatures (``text``, ``group``, ...) say only "same kind of
+    node": an inserted sibling item shifts every following wildcard
+    by one, and a signature-only anchor then pairs the unchanged old
+    item with the newly inserted neighbour - spurious inline diffs -
+    while the old item's byte-identical counterpart ends up among
+    the inserts. For wildcards we therefore also demand equal text;
+    a genuinely rewritten paragraph simply anchors the diff at its
+    first differing node, which the sequence alignment over the
+    remaining middle then pairs as before.
+    """
+    if o.signature() != n.signature():
+        return False
+    return o.text == n.text or o.signature() not in _PLAIN_SIGS
 
 
 def _sibling_swap_rescue(edits: list[Edit], _pair) -> list[Edit]:

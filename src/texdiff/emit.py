@@ -162,9 +162,123 @@ def render(edits: list[Edit], markup: LatexdiffMarkup = LatexdiffMarkup()) -> st
             else:
                 out.append(_wrap_node(edit.old, markup, added=False))
                 out.append(_wrap_node(edit.new, markup, added=True))
-    return _collapse_repeated_hlines(
-        _normalize_endmark_colours("".join(out))
+    return _strike_deleted_blocks(
+        _collapse_repeated_hlines(
+            _collapse_marker_glue(
+                _hoist_markers_off_macros(_normalize_endmark_colours("".join(out)))
+            )
+        )
     )
+
+
+# a block marker sitting directly after a control-sequence name.
+# TeX expands tokens while scanning a macro's argument, so a marker
+# glued after an argument-taking macro (\sphinxcode\DIFaddend{...})
+# executes INSIDE the argument's group scope: the colour switch it
+# performs never unbalances at the outer level and the added colour
+# bleeds over all following black material. Hoisting the marker in
+# front of the macro makes it execute at the outer level where the
+# emitter intended it. The macro part must not itself be a DIF
+# marker (adjacent markers may not commute).
+_MARKER_AFTER_MACRO_RE = re.compile(
+    r"(\\(?!DIF(?:add|del))[a-zA-Z]+\*?)"
+    r"((?:\\DIF(?:add|del)(?:begin|end)(?:FL)?)[ \t]*\n?)"
+)
+
+
+def _hoist_markers_off_macros(text: str) -> str:
+    """Move block markers from after a macro name to before it."""
+    if "\\DIFadd" not in text and "\\DIFdel" not in text:
+        return text
+    return _MARKER_AFTER_MACRO_RE.sub(r"\2\1", text)
+
+
+# a whole deleted block: text between the block markers. Only spans
+# that do not nest and do not already carry word marks are struck;
+# within them, a strike candidate is a text fragment WITHOUT any
+# backslash (macro), brace, ampersand, comment or math shift -
+# prose fragments between inline macro calls strike, entire lines
+# carrying macros stay red-unstruck
+_STRIKE_FRAGMENT_RE = re.compile(r"[^\\{}&%$]*[A-Za-z]{3,}[^\\{}&%$]*")
+
+# a del-block span, non-greedy, not nested (del begin..end never
+# nests another del begin by construction of the emitter)
+_DEL_SPAN_RE = re.compile(
+    r"(\\DIFdelbegin(?:FL)?)(.*?)(\\DIFdelend(?:FL)?)", re.S
+)
+
+
+def _strike_deleted_blocks(text: str) -> str:
+    """Strike plain text lines inside whole deleted blocks.
+
+    A block deletion (a retired environment or list item) colours
+    its span red via ``\\DIFdelbegin`` but never strikes it: the
+    ``\\sout`` of a single \\DIFdel{..} wrapper cannot span the
+    environment/structure inside. The plain prose between the
+    structural commands CAN be struck though, line by line, one
+    ``\\sout{..}`` per word (ulem cannot span the line break
+    itself). Lines containing anything TeX-structural (a macro,
+    brace, ampersand, comment, math) keep the plain red colour -
+    striking those would not compile or would mangle the markup.
+    Lines already carrying an inline \\DIFdel{..} word mark (mixed
+    word-level diffs inside a block region) stay untouched.
+    """
+    if "\\DIFdelbegin" not in text:
+        return text
+
+    def _strike_span(m: "re.Match") -> str:
+        body = m.group(2)
+        if "\\DIFdel{" in body or "\\DIFadd{" in body:
+            return m.group(0)  # already word-marked content
+        if "\\sout{" in body:
+            return m.group(0)  # a per-word strike already present
+        if not re.search(r"[A-Za-z]{3,}", body):
+            return m.group(0)  # structural content only, all red
+        # strike the longest safe fragment of each line: everything
+        # up to the first TeX-structural character; the remainder
+        # (macro calls, braces) keeps the plain red colour
+        out_lines = []
+        for line in body.split("\n"):
+            frag = _STRIKE_FRAGMENT_RE.match(line)
+            if not frag or not frag.group(0).strip():
+                out_lines.append(line)
+                continue
+            head = frag.group(0)
+            words = head.split()
+            struck = " ".join(f"\\sout{{{w}}}" for w in words)
+            out_lines.append(struck + line[len(head):])
+        return m.group(1) + "\n".join(out_lines) + m.group(3)
+
+    return _DEL_SPAN_RE.sub(_strike_span, text)
+
+
+# markup-glue blank lines: a whitespace-only line between block
+# markers of the same type is fabricated by the marker's own
+# trailing newline plus matched glue - TeX reads it as \par and
+# visibly splits an inserted list item's number from its content
+# ("8." alone, blank line, then the blue text). Whitespace-only
+# content carries no information: no revision ever had a blank line
+# between markers with nothing renderable between them.
+_MARKER_GLUE_RE = re.compile(
+    r"(\\DIF(?:add|del)(?:begin|end)(?:FL)?)"
+    r"((?:(?:[ \t]*\n)+[ \t]*|\\DIFadd\{\{\}\})+)"
+    r"(\\DIF(?:add|del)(?:begin|end)(?:FL)?)"
+)
+
+
+def _collapse_marker_glue(text: str) -> str:
+    """Merge blank-line runs between adjacent block markers.
+
+    Only glue that would typeset nothing - whitespace-only lines or
+    an empty ``\\DIFadd{{}}`` wrapper - is collapsed between markers
+    of the same family; real content between markers keeps its
+    paragraphs untouched.
+    """
+    while True:
+        new = _MARKER_GLUE_RE.sub(r"\1\3", text)
+        if new == text:
+            return new
+        text = new
 
 
 # inline end-marker tokens of longtable HEAD material; NOT preceded
@@ -861,10 +975,37 @@ def _wrap_node(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
         # outside markup - \DIFdel{a & b} is illegal in alignment
         return _wrap_row(node, markup, added)
     if _needs_block(node):
+        if _SAFE_DECOR_RE.fullmatch(node.text.strip()) and _is_safe_inline(
+            _SAFE_DECOR_RE.fullmatch(node.text.strip()).group(2)
+        ):
+            # a decoration macro WITH its complete argument
+            # (\textbf{...} from Sphinx's \sphinxstylestrong etc.)
+            # is LR-safe to wrap as a whole: the markup braces
+            # cannot steal the macro's argument because the node
+            # text carries it. The block markers' trailing newlines
+            # would instead insert a paragraph break after the
+            # wrapped label (a lone \DIFaddend\n between label and
+            # text leaves a blank line at the item's first row).
+            pad_l = node.text[: len(node.text) - len(node.text.lstrip())]
+            pad_r = node.text[len(node.text.rstrip()) :]
+            core = node.text.strip()
+            if added:
+                return pad_l + _wrap(core, markup.add_open, markup.add_close) + pad_r
+            return pad_l + _wrap(core, markup.del_open, markup.del_close) + pad_r
         if added:
             body = _mark_added_listings(node.text)
             body = _mark_heading_args_in_run(body)
             return f"{markup.block_add_open}{body}{markup.block_add_close}"
+        if _DEFINES_MACRO_RE.search(node.text):
+            # a deleted macro definition would not *render* in the
+            # red-strike region - it would EXECUTE at typeset time
+            # and silently redefine the macro, overriding whatever
+            # the (possibly marked-up) preamble or an earlier part
+            # of the body established. latexdiff's convention for
+            # deleted commands applies: comment the definition out
+            # (%DIFDELCMD), invisible in the output, reviewable in
+            # the source.
+            return _comment_out(node.text)
         return f"{markup.block_del_open}{node.text}{markup.block_del_close}"
     if added:
         body = _mark_heading_args_in_run(node.text)
@@ -1051,6 +1192,16 @@ def _wrap_row(node: Node, markup: LatexdiffMarkup, added: bool) -> str:
 
 # list/paragraph primitives that cannot appear inside \uwave/\sout
 _LIST_ITEM_RE = re.compile(r"\\(?:item|par|newline|linebreak|cr)\b")
+
+# a macro definition inside a deleted block: \def/\gdef/\edef/\xdef
+# directly followed by the defined name, or a \newcommand/\renewcommand
+# whose first argument is the defined name. Matching only the OPENING
+# token keeps false positives near zero (\definedcolor etc. do not
+# parse as \def + name).
+_DEFINES_MACRO_RE = re.compile(
+    r"\\(?:gdef|edef|xdef|def)\s*\\[a-zA-Z]+\s*\{"
+    r"|\\(?:re)?newcommand\*?\s*\{\s*\\[a-zA-Z]+\s*\}"
+)
 
 
 def _comment_out(text: str) -> str:
@@ -1570,6 +1721,13 @@ def _render_row_region(edits: list[Edit], markup: LatexdiffMarkup) -> str:
         # single edit: normal render path, but recurse for inner lists
         if isinstance(e, Modify) and e.inner is not None:
             out.append(_render_recursed(e, markup))
+        elif isinstance(e, Modify):
+            # a plain Modify (no children to recurse into) used to
+            # fall through every branch and vanish from the output -
+            # e.g. a reworded \textbf{label} macro inside a modified
+            # list item. Render both sides with the normal wrap.
+            out.append(_wrap_node(e.old, markup, added=False))
+            out.append(_wrap_node(e.new, markup, added=True))
         elif isinstance(e, Match):
             txt = e.node.text
             _record_tail(txt, emitted_tails)

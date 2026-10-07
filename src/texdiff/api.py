@@ -256,6 +256,27 @@ def _run_similarity(a: str, b: str) -> float:
     return SequenceMatcher(a=wa, b=wb, autojunk=False).ratio()
 
 
+def _extends_by_words(short: str, long: str) -> bool:
+    """Whether one run is the other with words appended (or removed).
+
+    Text appended to a sentence (``... compression.`` growing into
+    ``... compression: the file structure ...``) drives the word
+    overlap ratio far below the replace threshold - the shared
+    prefix is drowned by the additions - yet the change IS an edit
+    of the same sentence: the word differ renders exactly the right
+    thing (struck final period, inserted tail). Prefix/suffix word
+    containment therefore overrides the ratio before a paragraph is
+    judged a wholesale rewrite.
+    """
+    wa = [w for w in (t.strip(".,;:!?()\"'`") for t in short.split()) if w]
+    wb = [w for w in (t.strip(".,;:!?()\"'`") for t in long.split()) if w]
+    if len(wa) >= len(wb):
+        wa, wb = wb, wa
+    if not wa or len(wb) - len(wa) < 3:
+        return False
+    return wb[: len(wa)] == wa or wb[len(wb) - len(wa):] == wa
+
+
 def _paragraph_edits(old: str, new: str) -> list[Edit] | None:
     """Word-refine a text run paragraph by paragraph.
 
@@ -283,10 +304,13 @@ def _paragraph_edits(old: str, new: str) -> list[Edit] | None:
     if len(paras_a) != len(paras_b) or any(
         not p.strip() for p in paras_a + paras_b
     ):
-        # mismatched paragraph structure: whole-run judgement
+        # mismatched paragraph structure: whole-run judgement.
+        # (A word-prefix run is still an edit of the same sentence,
+        # never a rewrite - keep the word-level treatment.)
         return (
             None
             if _run_similarity(old, new) < _REPLACE_WORD_SIMILARITY
+            and not _extends_by_words(old, new)
             else _chunks_to_edits(word_diff(old, new))
         )
 
@@ -294,9 +318,17 @@ def _paragraph_edits(old: str, new: str) -> list[Edit] | None:
         # paragraph separator, kept from the NEW side when it exists
         return Match(node=text_node(text if text.strip() else "\n\n"))
 
-    out: list[Edit] = [sep(lead_b or lead_a)]
+    # the lead is leading whitespace of the run (often empty): an
+    # EMPTY lead must not fabricate a "\n\n" paragraph break that
+    # neither revision had - it would typeset a blank line at the
+    # start of the marked run (e.g. right after a list item's bold
+    # label, splitting the item into "label." + "rest" lines)
+    out: list[Edit] = [Match(node=text_node(lead_b or lead_a))]
     for k, (ca, cb) in enumerate(zip(paras_a, paras_b)):
-        if _run_similarity(ca, cb) < _REPLACE_WORD_SIMILARITY:
+        if (
+            _run_similarity(ca, cb) < _REPLACE_WORD_SIMILARITY
+            and not _extends_by_words(ca, cb)
+        ):
             out.append(Delete(old=text_node(ca)))
             out.append(Insert(new=text_node(cb)))
         else:

@@ -133,3 +133,115 @@ longitude & float32 \\\\
         assert "polarised" in r.marked_up
         assert "\\begin{longtable}" in r.marked_up
         assert "\\end{longtable}" in r.marked_up
+
+
+class TestModifiedLabelledItem:
+    """A reworded item of a labelled list (bold head + text body).
+
+    Sphinx list items render as ``\\item {}`` + ``\\par`` +
+    ``\\sphinxstylestrong{Label}: body``; the bold head is an atomic
+    macro node and the body a separate text node. Both used to take
+    block markers whose trailing newlines - plus a fabricated ``\\n\\n``
+    lead from the paragraph refine - typeset a blank line between the
+    item number and the (struck/added) content, breaking the item
+    across two visual lines.
+    """
+
+    OLD = """\
+\\documentclass{article}
+\\begin{document}
+\\begin{enumerate}
+\\item {}
+\\par
+\\textbf{Output packaging}: Processed files packaged by the IOHandler.
+\\end{enumerate}
+\\end{document}
+"""
+
+    def _diff(self, new_body: str) -> str:
+        new = self.OLD.replace(
+            "\\textbf{Output packaging}: Processed files packaged by the IOHandler.",
+            new_body,
+        )
+        return diff_documents(self.OLD, new, inject_preamble=False).marked_up
+
+    def test_no_paragraph_break_after_item_label(self):
+        out = self._diff(
+            "\\textbf{Schema-driven output}: Each file created by the writer."
+        )
+        # the label keeps the inline wrap (no block markers with
+        # their trailing newlines) and stays glued to the body:
+        # no blank line between the item label and the text run
+        assert "\\DIFdelbegin\n" not in out
+        assert "\\textbf{Output packaging}\\DIFdelend" not in out
+        assert "\\DIFdel{\\textbf{Output packaging}}" in out
+        assert "\\DIFadd{\\textbf{Schema-driven output}}" in out
+        assert "\\DIFdel{\\textbf{Output packaging}}\\DIFadd{" in out
+
+    def test_reworded_plain_item_stays_one_paragraph(self):
+        out = self._diff(
+            "\\textbf{Output packaging}: Each file is packaged into SAFE containers."
+        )
+        # same label, reworded body: the label stays visible right
+        # after \par and no blank line opens between it and the
+        # marked-up body
+        assert "\\textbf{Output packaging}" in out
+        assert "par\n\\textbf" in out
+        assert "\\textbf{Output packaging}\n\n" not in out
+        assert "\\DIFdel{" in out and "\\DIFadd{" in out
+
+
+class TestAppendedClause:
+    """A sentence extended with a new clause stays word-diffed.
+
+    The overlap ratio of "... compression." growing into
+    "... compression: the file structure ..." falls below the
+    replace threshold, yet the change is an edit of the same
+    sentence - not a wholesale rewrite. The word differ renders it
+    as a struck final period plus an inserted tail.
+    """
+
+    OLD = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "Write output to NetCDF4 with standardised metadata and compression.\n"
+        "\\end{document}\n"
+    )
+
+    def _diff(self, new_body: str) -> str:
+        new = self.OLD.replace(
+            "Write output to NetCDF4 with standardised metadata and compression.",
+            new_body,
+        )
+        return diff_documents(self.OLD, new, inject_preamble=False).marked_up
+
+    def test_appended_clause_is_word_diffed(self):
+        out = self._diff(
+            "Write output to NetCDF4 with standardised metadata and "
+            "compression: the file structure (dimensions, variables, "
+            "types, fill values, attributes) is defined by the NCML "
+            "product schema for the output type and written through "
+            "the generic schema-driven writer."
+        )
+        # the shared sentence is kept and the change is inline word
+        # markup (both families present), NOT a whole-paragraph
+        # retire + re-add, which would strike the full old sentence
+        assert "Write output to NetCDF4 with standardised metadata" in out
+        assert "\\DIFadd{" in out
+        assert "\\DIFdel{" in out
+        # the struck material is punctuation/small words only - the
+        # sentence body is never deleted wholesale
+        import re as _re
+
+        for m in _re.finditer(r"\\DIFdel\{([^{}]*)\}", out):
+            words = [w for w in m.group(1).split() if w.isalpha()]
+            assert len(words) <= 2, m.group(1)
+
+    def test_genuine_rewrite_still_retires(self):
+        out = self._diff(
+            "Completely different content that shares no words at all here."
+        )
+        # unrelated sentence: whole-paragraph retire + re-add - the
+        # full old sentence is struck in one piece (block or whole-
+        # paragraph inline form, never word fragments)
+        assert "\\DIFdel{Write output to NetCDF4" in out
+        assert "\\DIFadd{Completely different" in out

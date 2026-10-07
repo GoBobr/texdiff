@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+import re
+
 from texdiff.api import diff_documents
 from texdiff.preamble import new_preamble, preamble_tuple, split_preamble
 
@@ -151,3 +153,55 @@ class TestMacroBodyMarkup:
         out = self._run(old_rows, new_rows)
         assert out.count("2 & 2023 & & DCR1") == 1
         assert "\\hline}" in out
+
+    def test_definition_line_never_coloured(self):
+        # a \color painted on the macro's own definition line would
+        # execute while the PREAMBLE is being read - no group scopes
+        # it there - leaking blue over the entire document (table
+        # captions, running headers, page numbers)
+        old_rows = "1 & 2022 & & Init \\\\\n\\hline"
+        new_rows = "1 & 2022 & & Init \\\\\n2 & 2023 & & DCR1 \\\\\n\\hline"
+        out = self._run(old_rows, new_rows)
+        assert "\\color{blue} \\def\\changerecord{" not in out
+        start = out.index("\\def\\changerecord{")
+        assert not out[start:].startswith("\\color")
+
+    def test_migrated_macro_keeps_unchanged_rows_black(self):
+        # the macro defined in the old BODY and in the new PREAMBLE:
+        # the old body must be searched for the counterpart rows, or
+        # every row (including unchanged ones) is painted blue
+        old = (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "\\def\\changerecord{%\n"
+            "1 & 2022 & & Init \\\\\n"
+            "}\n"
+            "\\begin{longtable}{ll}\n\\changerecord\n\\end{longtable}\n"
+            "\\end{document}\n"
+        )
+        new = (
+            "\\documentclass{article}\n"
+            "\\def\\changerecord{%\n"
+            "1 & 2022 & & Init \\\\\n"
+            "2 & 2023 & & DCR1 \\\\\n"
+            "}\n"
+            "\\begin{document}\n"
+            "\\begin{longtable}{ll}\n\\changerecord\n\\end{longtable}\n"
+            "\\end{document}\n"
+        )
+        out = diff_documents(old, new).marked_up
+        pre = out[: out.index("\\begin{document}")]
+        # the unchanged row 1 keeps no colour declaration ahead of it
+        assert "\\color{blue} 1 & 2022" not in pre
+        # the new row 2 is coloured per cell
+        assert re.search(
+            r"\\color\{blue\} 2 & \\color\{blue\}\s+2023", pre
+        )
+        # the old body-side definition no longer typesets: it would
+        # silently redefine the macro and override the marked one
+        # (it must survive only inside %DIFDELCMD comments)
+        body = out[out.index("\\begin{document}") :]
+        body_code = "\n".join(
+            l for l in body.splitlines() if not l.lstrip().startswith("%")
+        )
+        assert "\\def\\changerecord{" not in body_code

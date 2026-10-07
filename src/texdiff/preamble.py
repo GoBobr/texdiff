@@ -190,7 +190,10 @@ def mark_preamble_macro_changes(
     per-cell colour treatment the emitter uses for unsafe added runs
     - ``\\color{blue}`` re-started after each ``&``. Deleted lines are
     commented out (``%DIF <``, latexdiff preamble convention) so the
-    old rows stay visible in the source without typesetting.
+    old rows stay visible in the source without typesetting. The
+    definition and pure closing lines of a tracked macro stay
+    verbatim, so the colour declaration cannot leak out of the cell
+    groups (see :func:`_color_body_line`).
 
     The operation is textual and strictly contained in the preamble;
     it cannot affect compilation because ``\\color`` inside a macro
@@ -200,6 +203,11 @@ def mark_preamble_macro_changes(
     pre_new, body_new, _post_new = split_preamble(new_source)
     if not pre_new:
         return marked_up
+    # The old counterpart of a preamble macro may be defined in the
+    # old BODY (macros can migrate between revisions): search the
+    # whole old document, so a moved definition keeps its unchanged
+    # rows unmarked instead of painting the entire table blue.
+    old_def = old_source
     names = _invoked_preamble_macros(pre_new, body_new)
     # only macro bodies that are typeset as TABLES may carry the
     # per-cell colour markup: a \color is only meaningful - and only
@@ -216,35 +224,13 @@ def mark_preamble_macro_changes(
     if not changed and not deleted:
         return marked_up
     return (
-        _apply_macro_markup(pre_old, pre_new, changed, deleted, names)
+        _apply_macro_markup(old_def, pre_new, changed, deleted, names)
         + marked_up[len(pre_new) :]
     )
 
 
 def _apply_macro_markup(
-    old_pre: str,
-    new_pre: str,
-    changed: list[str],
-    deleted: list[str],
-    names: set[str],
-) -> str:
-    """Merge the old and new tracked macro bodies, marked per line.
-
-    Emits the NEW preamble with, inside each tracked macro body:
-
-    * genuinely new lines prefixed ``\\color{blue}`` per cell;
-    * lines that existed only in the old body re-inserted at their
-      original position as ``%DIF <`` comments (latexdiff preamble
-      convention: invisible in the typeset output, reviewable in
-      source).
-
-    The merge aligns the old and new body lines on their normalized
-    content (SequenceMatcher over normalized lines): equal lines are
-    kept verbatim, old-only lines become comments, new-only lines
-    are coloured blue.
-    """
-def _apply_macro_markup(
-    old_pre: str,
+    old_def: str,
     new_pre: str,
     changed: list[str],
     deleted: list[str],
@@ -262,15 +248,17 @@ def _apply_macro_markup(
 
     Each macro's old and new body lines are aligned on their
     normalized content (SequenceMatcher): equal lines kept verbatim,
-    old-only lines commented, new-only lines coloured blue. Bodies
-    are spliced back in reverse document order so earlier line
-    indices stay valid.
+    old-only lines commented, new-only lines coloured blue.
+
+    ``old_def`` carries the OLD side text the macro bodies are read
+    from - usually the old preamble, but a whole document when the
+    macro was defined in the old body (migration case).
     """
     pre_out = new_pre.splitlines()
     spliced = False
     for name, rng in _body_ranges(new_pre, names):
         new_body = _macro_body(new_pre, name)
-        old_body = _macro_body(old_pre, name)
+        old_body = _macro_body(old_def, name)
         sm = difflib.SequenceMatcher(
             a=[_norm_line(l) for l in old_body],
             b=[_norm_line(l) for l in new_body],
@@ -290,10 +278,10 @@ def _apply_macro_markup(
             elif tag == "delete":
                 merged.extend(f"%DIF < {l}" for l in old_body[i1:i2])
             elif tag == "insert":
-                merged.extend(_color_line(l) for l in new_body[j1:j2])
+                merged.extend(_color_body_line(l) for l in new_body[j1:j2])
             else:  # replace
                 merged.extend(f"%DIF < {l}" for l in old_body[i1:i2])
-                merged.extend(_color_line(l) for l in new_body[j1:j2])
+                merged.extend(_color_body_line(l) for l in new_body[j1:j2])
         if merged != new_body or len(merged) != len(new_body):
             pre_out[rng[0] : rng[1]] = merged
             spliced = True
@@ -387,5 +375,29 @@ def _strip_comment(line: str) -> str:
 
 def _color_line(line: str) -> str:
     """Prepend \\color{blue} per table cell (after every &)."""
+    line = f"\\color{{blue}} {line}"
+    return re.sub(r"(?<!\\)&", r"& \\color{blue} ", line)
+
+
+def _color_body_line(line: str) -> str:
+    """Colour one macro-body line blue, unless it must stay verbatim.
+
+    Two kinds of lines are returned untouched:
+
+    * any definition/newcommand opener (``\\def\\name{...``) - a
+      ``\\color`` painted on the macro's own definition line
+      executes while the PREAMBLE is being read, before any group
+      scopes it, and the declaration then leaks over the entire
+      document (table captions, running headers and page numbers
+      all render blue);
+    * a line that is nothing but braces/whitespace/comment (a pure
+      closing ``}``) - it carries no content and no cell group to
+      contain the declaration.
+    """
+    code = _strip_comment(line)
+    if _DEF_RE.search(code) or _NEWCOMMAND_RE.search(code):
+        return line
+    if _is_closing_line(line):
+        return line
     line = f"\\color{{blue}} {line}"
     return re.sub(r"(?<!\\)&", r"& \\color{blue} ", line)

@@ -69,3 +69,23 @@ class TestSameSignatureDifferentText:
         mods = [e for e in edits if isinstance(e, Modify)]
         assert len(mods) == 1
         assert mods[0].new.children[0].text == "B"
+
+    def test_inserted_sibling_does_not_steal_wildcard_anchor(self):
+        # one item inserted into a list whose entries are wildcard-
+        # signature nodes (texts and plain groups): the unchanged
+        # old tail must Match verbatim, not inline-diff against the
+        # inserted neighbour
+        old = [text_node("a\n\n"), text_node("b long body\n\n"), text_node("c\n\n")]
+        new = [text_node("a\n\n"), text_node("NEW inserted\n\n"), text_node("b long body\n\n"), text_node("c\n\n")]
+        edits = align(old, new)
+        assert [type(e).__name__ for e in edits] == [
+            "Match", "Insert", "Match", "Match",
+        ]
+
+    def test_inserted_group_sibling_leaves_equal_groups_matched(self):
+        # same scenario with plain groups (e.g. {\sphinxupquote{...}}
+        # label groups): equal-text groups anchor, unequal ones do not
+        old = [group(text_node("handlers")), text_node("tail\n\n")]
+        new = [group(text_node("schemas")), group(text_node("handlers")), text_node("tail\n\n")]
+        edits = align(old, new)
+        assert [type(e).__name__ for e in edits] == ["Insert", "Match", "Match"]
