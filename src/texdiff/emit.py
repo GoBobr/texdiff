@@ -162,7 +162,9 @@ def render(edits: list[Edit], markup: LatexdiffMarkup = LatexdiffMarkup()) -> st
             else:
                 out.append(_wrap_node(edit.old, markup, added=False))
                 out.append(_wrap_node(edit.new, markup, added=True))
-    return _normalize_endmark_colours("".join(out))
+    return _collapse_repeated_hlines(
+        _normalize_endmark_colours("".join(out))
+    )
 
 
 # inline end-marker tokens of longtable HEAD material; NOT preceded
@@ -223,6 +225,55 @@ def _normalize_endmark_colours(text: str) -> str:
         return match.group(0)
 
     return _ENDMARK_COLOR_RE.sub(_insert_reset, text)
+
+
+# invisible-to-the-typesetter material that can sit between two
+# \hline rules: blank lines, %DIFDELCMD-style comments and the
+# no-op FL markers of flush-left diff regions
+_INVISIBLE_BETWEEN_RULES = (
+    r"(?:[ \t]*%[^\n]*\n?|[ \t]*\n|"
+    r"\\DIF(?:add|del)(?:begin|end)FL\n?|\\DIF(?:add|del)(?:begin|end)\n?)*"
+)
+# two consecutive \hline rules separated only by invisible material
+# (a deleted row's tail rule + the skeleton rule of the material
+# that follows): both draw the SAME grid line - longtable stacks
+# them with zero offset and the boundary prints twice as thick.
+# The pair is CONSUMED and replaced by a single rule (a lookahead
+# replacement would be a no-op: group 1 is identical to the match).
+# Iteration in _collapse_repeated_hlines handles longer runs.
+_REPEATED_HLINE_RE = re.compile(
+    r"\\hline" + _INVISIBLE_BETWEEN_RULES + r"[ \t]*\\hline"
+)
+# same-line adjacency: rules glued to one line by the row split
+# ("\hline\hline") or separated only by spaces/tabs draw on top of
+# each other just the same
+_REPEATED_HLINE_INLINE_RE = re.compile(r"\\hline[ \t]*\\hline")
+
+
+def _collapse_repeated_hlines(text: str) -> str:
+    """Merge grid rules that land on top of each other.
+
+    Row-region emitters keep skeleton ``\\hline``s on both sides of
+    their material: a retired (deleted) row region ends with its
+    trailing rule while the following region's lead already carries
+    one, and blank lines / ``%DIFDELCMD`` comments / no-op ``FL``
+    markers sit between them. Two rules with only invisible
+    material between them draw the same grid line - longtable
+    typesets them stacked at zero offset, printing a border twice
+    as thick as every other rule in the table.
+
+    One rule of each such pair is dropped. Visible material
+    (content, colour declarations) between two rules keeps both -
+    they delimit a real row.
+    """
+    if "\\hline" not in text:
+        return text
+    while True:
+        new = _REPEATED_HLINE_INLINE_RE.sub(r"\\hline", text)
+        new = _REPEATED_HLINE_RE.sub(r"\\hline", new)
+        if new == text:
+            return new
+        text = new
 
 
 def _hoist_retired_tables(edits: list[Edit]) -> list[Edit]:
