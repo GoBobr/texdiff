@@ -834,9 +834,13 @@ def _table_keyed_pair_rescue(edits: "list[Edit]", _pair) -> "list[Edit]":
     by key with a LATER insert's table rows, convert the pair into a
     Modify so the emit layer's inline row markup applies.
 
-    Row keys compare by last path component: HDF-EOS grids get
-    renamed (NPP_Grid_IMG_2D -> VIIRS_Grid_IMG_2D) without touching
-    the data fields.
+    Row keys compare by the FULL first cell: an HDF-EOS grid
+    rename (NPP_Grid_IMG_2D -> VIIRS_Grid_IMG_2D) changes every
+    row's path prefix, and the resulting Modify would render as two
+    wholesale blocks (all rows struck, then all re-added) inside
+    one table - worse than leaving the pair as a clean whole-table
+    retire + reintroduction. Regenerated tables keep their row
+    keys; only wholesale renames are left alone.
     """
     import re
 
@@ -845,8 +849,7 @@ def _table_keyed_pair_rescue(edits: "list[Edit]", _pair) -> "list[Edit]":
             return set()
         keys = set()
         for m in re.finditer(r"^\s*([^&%\n]+?)\s*&", node.text or "", re.M):
-            key = m.group(1).strip().replace("\\_", "_")
-            keys.add(key.rsplit("/", 1)[-1])
+            keys.add(m.group(1).strip().replace("\\_", "_"))
         return keys
 
     dels = [

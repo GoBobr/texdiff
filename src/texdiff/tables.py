@@ -355,12 +355,27 @@ def rows_pair_by_key(old_text: str, new_text: str, min_frac: float = 0.5) -> boo
     generation changes type names, shapes and every attribute), so
     word similarity collapses and the pair looks mutually
     unrecognizable - while the logical row structure (one row per
-    variable: ``lat``, ``lon``, ``crs``, ...) is intact. When at least
-    ``min_frac`` of the smaller side's rows have a first cell that
-    also appears as a first cell on the other side, the table is the
+    variable: ``lat``, ``lon``, ``crs``, ...) is intact. When at
+    least ``min_frac`` of the smaller side's rows have a first cell
+    that also appears as a first cell on the other side, the table is the
     SAME table with edited cells: inline row markup (red struck cell,
     blue replacement right after) reads far better than retiring the
     whole table and reintroducing it blue.
+
+    The FULL key must match - a whole-prefix rename (an HDF-EOS
+    grid renamed ``NPP_Grid_IMG_2D`` -> ``VIIRS_Grid_IMG_2D``)
+    changes every row's path without making the rows unrelated, but
+    the row-level machinery (_row_key_of / _segment_ids) keys on the
+    full first cell: with near-zero full-key overlap the pairing
+    never happens and the inline path degrades to two wholesale
+    blocks (all rows struck, then all rows re-added) in one table.
+    Such near-total renames read better as one clean whole-table
+    retire and one blue reintroduction, which the caller
+    (merge_tables / render_restructured) provides - so they are
+    rejected here even though their LAST path components still
+    match. Regenerated grouped tables keep ~75% full-key overlap
+    (the attribute keys repeat per group) and stay above the gate;
+    renamed-grid tables sit at ~25% or below.
     """
     lo = [
         _first_cell(r)
@@ -377,15 +392,8 @@ def rows_pair_by_key(old_text: str, new_text: str, min_frac: float = 0.5) -> boo
     # structural repeats (header rows repeated via \endhead) must not
     # count twice per side
     lo, ln = set(lo), set(ln)
-    # grid renames (NPP_Grid_IMG_2D -> VIIRS_Grid_IMG_2D) change the
-    # path prefix of every HDF-EOS field row without touching the
-    # data field itself: rows also pair when their last path
-    # component matches
-    def _last(k: str) -> str:
-        return k.rsplit("/", 1)[-1] if "/" in k else k
-    lo_last, ln_last = {_last(k) for k in lo}, {_last(k) for k in ln}
-    shared = len(lo_last & ln_last)
-    return shared >= min_frac * min(len(lo_last), len(ln_last)) and shared >= 2
+    shared = len(lo & ln)
+    return shared >= min_frac * min(len(lo), len(ln)) and shared >= 2
 
 
 _SPEC_RE = re.compile(r"\\begin\{longtable\*?\}\s*\{")
