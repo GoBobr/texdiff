@@ -1556,7 +1556,13 @@ def _is_safe_inline(text: str) -> bool:
         return False
     if "\n" in text:
         return False
-    if _ARG_MACRO_RE.search(text) or _ARG_MACRO_BR_RE.search(text):
+    # decoration macros (\\emph, \\textbf, ...) with pure-text
+    # arguments are LR-safe inside \\DIFdel/\\DIFadd - font commands
+    # survive \\sout/\\uwave. Mask them before the macro-argument
+    # probe or cells like ``\\emph{valid\\_min} to \\emph{valid\\_max}``
+    # degrade to the colour-only fallback: red but never struck.
+    probe = _SAFE_DECOR_RE.sub(lambda m: m.group(2), text)
+    if _ARG_MACRO_RE.search(probe) or _ARG_MACRO_BR_RE.search(probe):
         return False
     if _LIST_ITEM_RE.search(text):
         # \item / \par inside a strikeout/wave is LR-mode illegal
@@ -2239,6 +2245,11 @@ def _escape_cell_pair(old_cell: str, new_cell: str) -> str:
         if _is_safe_inline(new_cell):
             return f"\\DIFadd{{{new_cell}}}"
         return f"\\DIFaddbegin{{}} {new_cell} \\DIFaddend{{}}"
+    if not new_cell:
+        # text -> empty: strike the old cell (blue adds nothing)
+        if _is_safe_inline(old_cell):
+            return f"\\DIFdel{{{old_cell}}}"
+        return f"\\DIFdelbegin{{}} {old_cell} \\DIFdelend{{}}"
     # underscore-escape-only difference: the OLD ADS generator emits
     # raw ``_`` in variable paths while the NEW one escapes it as
     # ``\_`` - both render identically in LaTeX. A cell pair that
@@ -2459,7 +2470,9 @@ def _merge_keyed_rows(
     parts: list[str] = []
     for oc, nc in zip(old_cells, new_cells):
         oc_s, nc_s = oc.strip(), nc.strip()
-        if oc_s == nc_s or not nc_s:
+        if oc_s == nc_s:
+            parts.append(oc)
+        elif not nc_s and not oc_s:
             parts.append(oc)
         else:
             parts.append(_escape_cell_pair(oc_s, nc_s))

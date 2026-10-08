@@ -1018,3 +1018,61 @@ class TestGroupedPairingRegressions:
             assert name in out[nearest : nearest + 12], (
                 f"{unit} merged into the wrong group"
             )
+
+    def test_decorated_macro_cell_strikes_not_just_colours(self):
+        r"""Range-cell case: \emph{..} cells must strike, not just colour.
+
+        A changed cell containing only decoration macros with
+        pure-text arguments (``\emph{valid\_min} to
+        \emph{valid\_max}``) is LR-safe inside \DIFdel/\DIFadd:
+        font commands survive \sout/\uwave. It must render with the
+        inline strike markup, not degrade to the colour-switch-only
+        fallback (\DIFdelbegin..\DIFdelend), which paints the old
+        text red without striking it.
+        """
+        old_src = (
+            "\\documentclass{article}\\begin{document}\n"
+            "\\begin{longtable}{ll}\n\\caption{vars}\\\\\n"
+            "\\rowcolor{lightcyan} \\textbf{lat} & Latitude & float & "
+            "\\emph{valid\\_min} to \\emph{valid\\_max} & d1\\\\\n"
+            "\\end{longtable}\\end{document}\n"
+        )
+        new_src = old_src.replace(
+            "\\emph{valid\\_min} to \\emph{valid\\_max} & d1",
+            "defined by \\emph{valid\\_range} & lat",
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        # the old range cell is STRUCK inside \DIFdel{..}, not merely
+        # coloured by the block fallback
+        assert "\\DIFdel{\\emph{valid\\_min} to \\emph{valid\\_max}}" in out
+        # no colour-only degradation for the pair
+        assert "\\DIFdelbegin{} \\emph{valid" not in out
+        # new side waves its markup too
+        assert "\\DIFadd{defined by \\emph{valid\\_range}}" in out
+
+    def test_text_to_empty_cell_change_is_marked(self):
+        r"""Text->empty cell change must strike the old cell.
+
+        When a cell's content is removed entirely (the regenerated
+        spec leaves the Range column blank), the per-cell merge used
+        to emit the OLD cell verbatim with no markup at all: the
+        retired value silently appeared as unchanged text. It must
+        render struck red (and its counterpart, empty->text, wavy
+        blue).
+        """
+        old_src = (
+            "\\documentclass{article}\\begin{document}\n"
+            "\\begin{longtable}{lll}\n"
+            "z0 & 0 & 0 \\\\\n"
+            "z1 & 1 & 1 \\\\\n"
+            "\\rowcolor{lightcyan} \\textbf{day} & Date of Day & "
+            "\\emph{valid\\_min} to \\emph{valid\\_max} \\\\\n"
+            "w & 5 & 6 \\\\\n"
+            "\\end{longtable}\\end{document}\n"
+        )
+        new_src = old_src.replace(
+            "\\emph{valid\\_min} to \\emph{valid\\_max} \\\\",
+            " \\\\",
+        )
+        out = diff_documents(old_src, new_src, inject_preamble=False).marked_up
+        assert "\\DIFdel{\\emph{valid\\_min} to \\emph{valid\\_max}}" in out
