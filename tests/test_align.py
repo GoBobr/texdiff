@@ -89,3 +89,41 @@ class TestSameSignatureDifferentText:
         new = [group(text_node("schemas")), group(text_node("handlers")), text_node("tail\n\n")]
         edits = align(old, new)
         assert [type(e).__name__ for e in edits] == ["Insert", "Match", "Match"]
+
+
+def test_sibling_swap_rescue_pairs_verbatim_equal_swap_as_match():
+    """A swap that lands on a verbatim-equal sibling must Match.
+
+    The sibling-swap rescue re-pairs a Modify with the same-signature
+    Insert the old side actually resembles. When the swapped-in
+    sibling is byte-identical to the old node - an unchanged table
+    re-inserted next to a new sibling table (PGS "consumed
+    variables" band table) - the rescue used to construct a raw
+    Modify. Emit then rendered the IDENTICAL table as a wholesale
+    retired (red, unstruck) copy followed by a blue re-inserted
+    copy. The swap must go through _pair so equal text degrades to
+    a plain Match.
+    """
+    from texdiff.align import _sibling_swap_rescue
+    from texdiff.parse import parse
+
+    def _env(body: str):
+        return parse(f"\\begin{{savenotes}}\n{body}\n\\end{{savenotes}}\n")[0]
+
+    def _pair(o, n):
+        if o.text == n.text:
+            return Match(node=o)
+        return Modify(old=o, new=n)
+
+    old_node = _env("alpha beta gamma delta epsilon zeta")
+    wrong_new = _env("an unrelated climatology tail with other words")
+    right_new = _env("alpha beta gamma delta epsilon zeta")
+
+    edits = [Modify(old=old_node, new=wrong_new), Insert(new=right_new)]
+    out = _sibling_swap_rescue(edits, _pair)
+    # the identical counterpart matches: renders black, not retired
+    assert type(out[0]).__name__ == "Match"
+    assert out[0].node is old_node
+    # the previously (wrongly) chosen sibling stays visible as insert
+    assert type(out[1]).__name__ == "Insert"
+    assert out[1].new is wrong_new

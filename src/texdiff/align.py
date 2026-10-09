@@ -690,8 +690,12 @@ def _sibling_swap_rescue(edits: list[Edit], _pair) -> list[Edit]:
     for i, j in swaps.items():
         swap_new[i] = edits[j].new
         edits[j] = Insert(new=modifies[i].new)
+    # pair through _pair, NOT raw Modify: the swapped-in sibling can
+    # be verbatim-equal to the old node (the rescue often trades a
+    # mis-pairing for the node's TRUE counterpart). A raw Modify then
+    # renders an unchanged table as wholesale retired + reinserted.
     return [
-        Modify(old=modifies[idx].old, new=swap_new[idx])
+        _pair(modifies[idx].old, swap_new[idx])
         if idx in swaps
         else e
         for idx, e in enumerate(edits)
