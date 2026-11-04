@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from texdiff import DiffResult, diff_documents, diff_files
@@ -245,3 +247,62 @@ class TestAppendedClause:
         # paragraph inline form, never word fragments)
         assert "\\DIFdel{Write output to NetCDF4" in out
         assert "\\DIFadd{Completely different" in out
+
+    def test_shared_edge_paragraph_stays_word_diffed(self):
+        # a paragraph split at a macro boundary leaves a tail whose
+        # common prefix with the other side is a whole clause while
+        # the rest is reworded: the ratio dips below the floor, but
+        # the shared edge proves it is an edit, not a rewrite
+        old = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "Common methods for reading HDF5 datasets (with masked-array "
+            "support and HDF5 diagnostic suppression) and writing NetCDF4 "
+            "outputs (with configurable zlib compression and shuffle "
+            "filtering).\n\\end{document}\n"
+        )
+        new = old.replace(
+            "suppression) and writing NetCDF4 outputs (with configurable "
+            "zlib compression and shuffle filtering).",
+            "suppression). Writing of NetCDF4 outputs is performed through "
+            "the generic schema-driven writer (see Overview), with "
+            "configurable zlib compression and shuffle filtering.",
+        )
+        out = diff_documents(old, new, inject_preamble=False).marked_up
+        # the shared prefix is untouched - no wholesale retire
+        assert "\\DIFdel{Common methods for reading" not in out
+        # and the change is marked inline at word level
+        assert "\\DIFdel{" in out and "\\DIFadd{" in out
+
+    def test_relocated_phrase_not_struck_twice(self):
+        # the parser splits the new sentence at \sphinxhyphen{}, so
+        # the deleted parenthetical and its identical twin inside
+        # the following inserted text never meet inside ONE word
+        # diff. Without relocation hoisting the phrase renders
+        # twice: struck red in place AND again in the added region.
+        # A long shared word run is a relocation, not a deletion:
+        # only the stray parens stay struck, the phrase carries
+        # once (in the added region).
+        old = (
+            "\\begin{document}\n"
+            "The reader retires one option (with configurable zlib "
+            "compression and shuffle filtering).\n"
+            "\\end{document}\n"
+        )
+        new = (
+            "\\begin{document}\n"
+            "The reader retires one option is performed through the "
+            "generic schema\\sphinxhyphen{}driven writer (see Overview), "
+            "with configurable zlib compression and shuffle filtering.\n"
+            "\\end{document}\n"
+        )
+        out = diff_documents(old, new, inject_preamble=False).marked_up
+        # the relocated phrase is never struck...
+        assert not re.search(r"\\DIFdel\{[^}]*configurable", out)
+        # ...but is present once, in the added region
+        assert out.count("with configurable zlib compression") == 1
+        # the truly deleted opening paren keeps its strike; the
+        # closing paren is struck after the relocated phrase while
+        # the sentence-final period (present in BOTH revisions)
+        # stays plain, and the paragraph break survives
+        assert "\\DIFdel{(" in out
+        assert re.search(r"filtering\\DIFdel\{\)\}\.", out)

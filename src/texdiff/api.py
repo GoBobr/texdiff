@@ -21,6 +21,11 @@ from .align import Delete, Edit, Insert, Match, Modify, align
 # re-added wholesale instead of word-marked: two sentences sharing
 # less than half their words are a rewrite, not an edit
 _REPLACE_WORD_SIMILARITY = 0.5
+
+# minimum common word run at a paragraph edge that keeps the pair on
+# the word-level path even below the ratio floor: a whole clause
+# (4+ words) is clearly the same sentence edited, not a rewrite
+_EDGE_WORD_MIN = 4
 from .emit import LatexdiffMarkup, render
 from .flatten import Flattener, flatten_file, flatten_source
 from .nodes import Node, text_node
@@ -257,24 +262,54 @@ def _run_similarity(a: str, b: str) -> float:
 
 
 def _extends_by_words(short: str, long: str) -> bool:
-    """Whether one run is the other with words appended (or removed).
+    """Whether one run shares a long word edge with the other.
 
-    Text appended to a sentence (``... compression.`` growing into
-    ``... compression: the file structure ...``) drives the word
-    overlap ratio far below the replace threshold - the shared
-    prefix is drowned by the additions - yet the change IS an edit
-    of the same sentence: the word differ renders exactly the right
-    thing (struck final period, inserted tail). Prefix/suffix word
-    containment therefore overrides the ratio before a paragraph is
+    Two cases keep a paragraph word-diffed even when the overlap
+    ratio falls below the replace threshold:
+
+    * **appended clause** - ``... compression.`` growing into
+      ``... compression: the file structure ...``: the shared
+      prefix is drowned by the additions, yet the change IS an
+      edit of the same sentence (struck final period, inserted
+      tail);
+    * **shared edge** - a paragraph split at a macro boundary (the
+      parser cuts runs at ``\\sphinxhyphen`` etc.) can leave a tail
+      whose common prefix with the other side is a whole clause
+      (``array support and HDF5 diagnostic suppression)``) while
+      the rest is reworded. Full containment misses it; a long
+      common edge catches it.
+
+    The word differ renders both correctly, so a shared edge of at
+    least a few words overrides the ratio before the paragraph is
     judged a wholesale rewrite.
     """
     wa = [w for w in (t.strip(".,;:!?()\"'`") for t in short.split()) if w]
     wb = [w for w in (t.strip(".,;:!?()\"'`") for t in long.split()) if w]
     if len(wa) >= len(wb):
         wa, wb = wb, wa
-    if not wa or len(wb) - len(wa) < 3:
+    if not wa or not wb:
         return False
-    return wb[: len(wa)] == wa or wb[len(wb) - len(wa):] == wa
+    # containment (append/remove): needs a meaningful addition
+    if len(wb) - len(wa) >= 3 and (
+        wb[: len(wa)] == wa or wb[len(wb) - len(wa):] == wa
+    ):
+        return True
+    # shared edge: longest common word run at the start or the end
+    # of both, counted case-insensitively (``Writing`` vs
+    # ``writing`` is the same word) and requiring a meaningful
+    # stretch - a whole clause, not a stop word
+    def edge(a: list[str], b: list[str]) -> int:
+        n = 0
+        for x, y in zip(a, b):
+            if x.lower() != y.lower():
+                break
+            n += 1
+        return n
+
+    return max(
+        edge(wa, wb),
+        edge(wa[::-1], wb[::-1]),
+    ) >= _EDGE_WORD_MIN
 
 
 def _paragraph_edits(old: str, new: str) -> list[Edit] | None:

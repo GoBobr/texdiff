@@ -90,6 +90,19 @@ class TestSameSignatureDifferentText:
         edits = align(old, new)
         assert [type(e).__name__ for e in edits] == ["Insert", "Match", "Match"]
 
+    def test_whitespace_only_pair_matches_new_bytes(self):
+        # two revisions differing only in blank-line count between
+        # paragraphs: a Modify here renders as del-block + add-block
+        # markers, and the marker glue pass then eats the blank line
+        # between them - the paragraph break vanishes and the next
+        # paragraph's first line glues to the previous one. The pair
+        # must Match the NEW bytes instead.
+        old = [text_node("para one."), text_node("\n\n\n"), text_node("para two.")]
+        new = [text_node("para one."), text_node("\n\n"), text_node("para two.")]
+        edits = align(old, new)
+        assert all(isinstance(e, Match) for e in edits)
+        assert edits[1].node.text == "\n\n"  # new bytes kept
+
 
 def test_sibling_swap_rescue_pairs_verbatim_equal_swap_as_match():
     """A swap that lands on a verbatim-equal sibling must Match.

@@ -59,3 +59,65 @@ class TestSemanticCleanup:
         chunks = word_diff("xxaxx", "xxbxx")
         ops = [c.op for c in chunks if c.op != "equal"]
         assert ops == ["delete", "insert"]
+
+    def test_reworded_sentence_not_shredded_word_by_word(self):
+        # a reworded sentence shares filler words with its new version
+        # ("with", "configurable", "zlib", ...); the sequence matcher
+        # pairs them across the real edit, producing a del/ins mosaic.
+        # The region between stable bridges must collapse into whole
+        # delete + insert clauses - the track-changes look reviewers
+        # expect - while the shared prefix and suffix stay equal.
+        old = (
+            "Common methods for reading HDF5 datasets (with masked-array "
+            "support and HDF5 diagnostic suppression) and writing NetCDF4 "
+            "outputs (with configurable zlib compression and shuffle "
+            "filtering)."
+        )
+        new = (
+            "Common methods for reading HDF5 datasets (with masked-array "
+            "support and HDF5 diagnostic suppression). Writing of NetCDF4 "
+            "outputs is performed through the generic schema-driven writer "
+            "(see Overview), with configurable zlib compression and shuffle "
+            "filtering."
+        )
+        chunks = word_diff(old, new)
+        # contract: chunks still reconstruct both sides exactly
+        assert apply(chunks, True) == old
+        assert apply(chunks, False) == new
+        # the shared prefix survives as an equal region; the long shared
+        # tail ("configurable ... shuffle") too - it may be followed by
+        # one tiny token pair ("filtering)." vs "filtering.")
+        assert chunks[0].op == "equal" and "HDF5 diagnostic" in chunks[0].text
+        equal_tails = [c for c in chunks if c.op == "equal" and "shuffle" in c.text]
+        assert equal_tails
+        # the reworded middle is coalesced: few change regions, each a
+        # whole clause - not dozens of single-token del/ins islands
+        change_groups = 0
+        prev = "equal"
+        for c in chunks:
+            if c.op in ("delete", "insert") and prev == "equal":
+                change_groups += 1
+            prev = c.op
+        assert change_groups <= 4
+        # and the rewording appears as whole clauses: the crossed
+        # "suppression) and writing" pair is a multi-word delete
+        clausal = [t for t in (c.text for c in chunks if c.op == "delete")]
+        assert any("suppression" in t and "writing" in t for t in clausal), clausal
+
+    def test_separate_small_edits_keep_word_level(self):
+        # two genuinely distinct single-word edits separated by a long
+        # stable stretch: word-level markup, NOT coalesced into one
+        # big replacement
+        chunks = word_diff(
+            "alpha beta gamma delta epsilon zeta eta theta",
+            " ALPHA beta gamma delta epsilon ZETA eta theta",
+        )
+        # each case-only word change is its own small region; the long
+        # bridge between them forbids coalescing
+        groups = 0
+        prev = "equal"
+        for c in chunks:
+            if c.op in ("delete", "insert") and prev == "equal":
+                groups += 1
+            prev = c.op
+        assert groups == 2

@@ -86,6 +86,7 @@ def word_diff(old: str, new: str) -> list[Chunk]:
     chunks = _merge_adjacent(chunks)
     chunks = _whitespace_to_new(chunks)
     chunks = _merge_replacements(chunks)
+    chunks = _coalesce_interleaved(chunks)
     return chunks
 
 
@@ -155,3 +156,71 @@ def _merge_replacements(chunks: list[Chunk]) -> list[Chunk]:
                     changed = True
                     break
     return _merge_adjacent(out)
+
+
+# a fragmented region must have at least this many change groups
+# (delete/insert runs) before it is coalesced into one replacement;
+# fewer means a plain word-level edit, not a reordering
+_COALESCE_MIN_GROUPS = 3
+
+# an equal chunk of at least this many words counts as a stable
+# "bridge": edits on either side of it are SEPARATE edits, each
+# keeping its own word-level markup. Shorter equals are filler the
+# sequence matcher paired across the real edit and get absorbed
+_BRIDGE_WORDS = 2
+
+
+def _word_count(text: str) -> int:
+    return len([w for w in text.split() if w])
+
+
+def _coalesce_interleaved(chunks: list[Chunk]) -> list[Chunk]:
+    """Collapse fragmented regions between stable bridges.
+
+    A reworded sentence often shares filler words with its new
+    version (``with``, ``configurable``, ``zlib``, ...), and the
+    sequence matcher happily pairs them while crossing the real
+    edit - the result is a del/ins mosaic where reviewer-relevant
+    clauses are shredded token by token.
+
+    Partition the chunk list at stable bridges (equal chunks of a
+    few words or more - the shared prefix, the shared tail, or
+    genuinely unchanged stretches inside the sentence). A region
+    BETWEEN bridges that consists of three or more change groups
+    is a crossed reordering, not separate small edits: render it
+    as ONE struck old region followed by ONE added new region -
+    the track-changes look of a whole-clause replacement.
+    """
+    if not chunks or len(chunks) < 5:
+        return chunks
+
+    # segment boundaries: indices after which a stable bridge ends
+    out: list[Chunk] = []
+    seg: list[Chunk] = []  # current region between bridges
+
+    def flush(seg: list[Chunk]) -> None:
+        if not seg:
+            return
+        groups = 0
+        prev_op = EQUAL
+        for c in seg:
+            if c.op != EQUAL and prev_op == EQUAL:
+                groups += 1
+            prev_op = c.op
+        if groups >= _COALESCE_MIN_GROUPS:
+            old_mid = "".join(c.text for c in seg if c.op in (EQUAL, DELETE))
+            new_mid = "".join(c.text for c in seg if c.op in (EQUAL, INSERT))
+            out.append(Chunk(DELETE, old_mid))
+            out.append(Chunk(INSERT, new_mid))
+        else:
+            out.extend(seg)
+
+    for c in chunks:
+        if c.op == EQUAL and _word_count(c.text) >= _BRIDGE_WORDS:
+            flush(seg)
+            seg = []
+            out.append(c)
+        else:
+            seg.append(c)
+    flush(seg)
+    return out

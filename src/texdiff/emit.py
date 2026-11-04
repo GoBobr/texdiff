@@ -87,6 +87,7 @@ def render(edits: list[Edit], markup: LatexdiffMarkup = LatexdiffMarkup()) -> st
     # between two Inserts and blocks the fusion
     edits = _pull_punctuation_deletes(edits)
     edits = _fuse_split_add_regions(edits)
+    edits = _hoist_repeated_phrases(edits)
     for edit in edits:
         if isinstance(edit, Match):
             out.append(edit.node.text)
@@ -683,6 +684,268 @@ def _fuse_split_add_regions(edits: list[Edit]) -> list[Edit]:
     if glue:
         out.extend(glue)
     return out
+
+
+# relocated-phrase detection: a word run shared between a deleted
+# region and the following added region must span at least this many
+# words ...
+_SHARED_RUN_MIN_WORDS = 4
+# ... AND at least this fraction of the shorter region's words, so
+# the bar rises with region size: a 30-word region needs a 10-word
+# shared run, a 6-word region only the floor of 4
+_SHARED_RUN_MIN_FRACTION = 3
+
+# edge punctuation: word identity ignores it ("filtering)" pairs
+# with "filtering"), but the characters themselves belong to the
+# side that carries them and keep that side's markup
+_SHARED_RUN_PUNCT = ".,;:!?()\"'`"
+
+
+def _shared_run_min(na: int, nb: int) -> int:
+    """Minimum word count for a run to count as relocated text.
+
+    Scales with region size instead of a flat constant: the longer
+    the deleted and added regions, the longer a common stretch must
+    be before it is treated as deliberate unchanged content that
+    moved, rather than words two different sentences happen to
+    share.
+    """
+    return max(
+        _SHARED_RUN_MIN_WORDS, min(na, nb) // _SHARED_RUN_MIN_FRACTION
+    )
+
+
+def _word_spans(text: str) -> list[tuple[int, int, str]]:
+    """(start, end, word) for every whitespace-separated word."""
+    return [(m.start(), m.end(), m.group(0)) for m in re.finditer(r"\S+", text)]
+
+
+def _relocated_span(del_text: str, ins_text: str) -> tuple[int, int] | None:
+    """Character span in ``del_text`` of a phrase that also exists
+    verbatim in ``ins_text`` (the following added region).
+
+    Words are compared with edge punctuation stripped - a deleted
+    word ``filtering)`` pairs with an added ``filtering`` - but the
+    returned span stops at word-character boundaries, so stray
+    punctuation (the ``(`` of ``(with``, the ``).`` after
+    ``filtering``) stays struck on the old side. The shared span
+    must appear in the added text character-for-character; interior
+    punctuation differences are not relocation.
+    """
+    dw = _word_spans(del_text)
+    iw = _word_spans(ins_text)
+    if not dw or not iw:
+        return None
+
+    def keys(spans: list[tuple[int, int, str]]) -> list[str]:
+        # empty keys (pure-punctuation words) must not match each
+        # other; sentinel keeps 1:1 index alignment with spans
+        return [
+            w[2].strip(_SHARED_RUN_PUNCT) or f"\x00{w[0]}"
+            for w in spans
+        ]
+
+    dk, ik = keys(dw), keys(iw)
+    sm = SequenceMatcher(a=dk, b=ik, autojunk=False)
+    best: tuple[int, int] | None = None
+    for blk in sm.get_matching_blocks():
+        if blk.size < _shared_run_min(len(dk), len(ik)):
+            continue
+        first, last = dw[blk.a], dw[blk.a + blk.size - 1]
+        s = first[0] + (len(first[2]) - len(first[2].lstrip(_SHARED_RUN_PUNCT)))
+        e = last[1] - (len(last[2]) - len(last[2].rstrip(_SHARED_RUN_PUNCT)))
+        if e <= s:
+            continue
+        if ins_text.find(del_text[s:e]) < 0:
+            continue
+        if best is None or (e - s) > (best[1] - best[0]):
+            best = (s, e)
+    return best
+
+
+def _hoist_repeated_phrases(edits: list[Edit]) -> list[Edit]:
+    """Render a phrase that moved across a node boundary once, unmarked.
+
+    The parser splits text at macro boundaries (``\\sphinxhyphen{}``,
+    ``{\\hyperref{...}}``), so a sentence fragment deleted on the old
+    side and its identical twin inside the following inserted text
+    can never meet inside one word diff - the aligner saw two
+    different fragments. The phrase would render twice: once struck
+    red in place, once again coloured as new ("with configurable
+    zlib compression and shuffle filtering" retired AND re-added).
+
+    A delete whose text contains a word run long enough to be
+    deliberate unchanged content and shared - word-for-word, ignoring
+    edge punctuation - with the following added region (inserts and
+    macro glue up to the next real delete or paragraph break) is a
+    relocation, not a deletion. Both regions give the shared run up:
+    the delete keeps only what truly went away (the stray bracket
+    characters around the run) and, when the run sits inside ONE
+    insert, that insert splits into add-run / plain shared text /
+    add-run - the phrase typesets once, unmarked, exactly as
+    latexdiff renders text present in both revisions.
+    """
+
+    def text_node(t: str, like: Node) -> Node:
+        return Node(kind=like.kind, text=t, atom=True, pos=like.pos)
+
+    for _ in range(10):  # converges; guard against pathological loops
+        replaced = False
+        for i, edit in enumerate(edits):
+            if not (isinstance(edit, Delete) and edit.old.kind == "text"):
+                continue
+            del_text = edit.old.text
+            if len(_word_spans(del_text)) < _SHARED_RUN_MIN_WORDS:
+                continue
+            region: list[str] = []
+            # eligible inserts in the region, as (index, accumulated
+            # offset) so a char span in the joined text maps back
+            ins_at: list[tuple[int, int]] = []
+            off = 0
+            for j, nxt in enumerate(edits[i + 1 :], start=i + 1):
+                if isinstance(nxt, Delete):
+                    if nxt.old.text.strip():
+                        break  # real competing old content ends it
+                    continue  # old paragraph separator: text goes on
+                if isinstance(nxt, Match):
+                    if "\n\n" in nxt.node.text:
+                        break  # paragraph boundary ends the region
+                    region.append(nxt.node.text)
+                    off += len(nxt.node.text)
+                elif isinstance(nxt, Insert) and _inline_kind(nxt.new):
+                    region.append(nxt.new.text)
+                    ins_at.append((j, off))
+                    off += len(nxt.new.text)
+                elif (
+                    isinstance(nxt, Insert)
+                    and nxt.new.kind == "group"
+                    and not _needs_block_env(nxt.new)
+                ):
+                    # inline group (e.g. {\hyperref{...}}): part of the
+                    # surrounding sentence, its text belongs to the
+                    # added region
+                    region.append(nxt.new.text)
+                    ins_at.append((j, off))
+                    off += len(nxt.new.text)
+                else:
+                    break
+            span = _relocated_span(del_text, "".join(region))
+            if span is None:
+                continue
+            lo, hi = span
+            shared = del_text[lo:hi]
+            # position of the shared run inside the JOINED region -
+            # del-text offsets and region offsets are different
+            # coordinate systems
+            rlo = "".join(region).find(shared)
+            if rlo < 0:
+                continue
+            # locate the single insert carrying the shared run; when
+            # it straddles insert/match boundaries the plain-text
+            # emission is not possible - the insert stays whole and
+            # the phrase renders as (unstruck) added text
+            carrier: tuple[int, int] | None = None
+            for j, base in ins_at:
+                txt = edits[j].new.text
+                if base <= rlo and base + len(txt) >= rlo + len(shared):
+                    found = txt.find(shared)
+                    if found < 0:
+                        carrier = None
+                        break
+                    carrier = (j, found)
+                    break
+            if carrier is None:
+                continue
+            j, c_off = carrier
+            ins = edits[j]
+            before, after = (
+                ins.new.text[:c_off],
+                ins.new.text[c_off + len(shared) :],
+            )
+            # the delete keeps only its genuinely removed edges. The
+            # PREFIX edge stays at the delete's position (the "(" of
+            # a retired parenthetical reads correctly right before
+            # the replacement text); the SUFFIX edge belongs AFTER
+            # the relocated phrase - the old ")" closed the
+            # parenthetical, which now ends at the phrase's new
+            # position, so striking it before the phrase puts the
+            # closing bracket in the middle of the sentence.
+            head = [t for t in (del_text[:lo],) if t.strip()]
+            tail = [t for t in (del_text[hi:],) if t.strip()]
+            # the insert: shared run pulled out as plain text. Edge
+            # fragments keep their WHITESPACE - a dropped fragment's
+            # leading/trailing newlines carry the new revision's
+            # paragraphing, and losing them glues the next paragraph
+            # onto the relocated phrase ('...filtering).' + 'SAFE
+            # handling:' on one line).
+            def ws_only(t: str) -> str:
+                return "".join(c for c in t if c.isspace())
+
+            pieces: list[Edit] = [Match(node=text_node(shared, ins.new))]
+            if before.strip():
+                pieces.insert(
+                    0, Insert(new=text_node(before, ins.new))
+                )
+            elif before:
+                pieces.insert(0, Match(node=text_node(before, ins.new)))
+            # an add-side tail that is pure punctuation the delete's
+            # suffix edge already carries (the final "." of both
+            # revisions) must not render twice - the struck suffix
+            # covers it, but any whitespace in the tail is the new
+            # side's paragraphing and survives as a plain match
+            dropped_tail = False
+            if after.strip() and not (
+                tail
+                and after.strip() in "".join(tail).strip()
+                and not re.search(r"\w", after)
+            ):
+                pieces.append(Insert(new=text_node(after, ins.new)))
+            else:
+                dropped_tail = True
+            if tail:
+                # the old suffix may end with punctuation the new
+                # side repeats after the phrase (both revisions end
+                # the sentence with "."): strike only the part that
+                # truly went away (the ")") and let the repeated
+                # punctuation render once, plain
+                t = "".join(tail)
+                a = after.strip()
+                common = 0
+                while (
+                    common < len(t)
+                    and common < len(a)
+                    and t[-1 - common] == a[-1 - common]
+                    and t[-1 - common] in _SHARED_RUN_PUNCT
+                ):
+                    common += 1
+                pure = t[: len(t) - common]
+                carry = t[len(t) - common :]
+                # suffix edge + shared punctuation, then the new
+                # side's paragraph break - the order matters: the
+                # break glued after a dropped tail sticks the next
+                # paragraph onto the struck bracket
+                if pure.strip():
+                    pieces.append(Delete(old=text_node(pure, edit.old)))
+                if carry:
+                    pieces.append(
+                        Match(node=text_node(carry, edit.old))
+                    )
+            if dropped_tail:
+                ws = ws_only(after)
+                if ws:
+                    pieces.append(Match(node=text_node(ws, ins.new)))
+            edits = (
+                edits[:i]
+                + [Delete(old=text_node(t, edit.old)) for t in head]
+                + edits[i + 1 : j]
+                + pieces
+                + edits[j + 1 :]
+            )
+            replaced = True
+            break
+        if not replaced:
+            break
+    return edits
 
 
 # sentence punctuation a stranded Delete of which reads as noise
@@ -1616,7 +1879,13 @@ def _render_recursed(edit: Modify, markup: LatexdiffMarkup) -> str:
             edit.new.text, markup.add_open, markup.add_close
         )
     prefix, suffix = wrapped
-    rendered = _render_row_region(edit.inner or [], markup)
+    # the inner script is a flat list of atomic edits just like the
+    # top-level one: relocation hoisting must run here too (a moved
+    # phrase and its twin can straddle a macro inside the recursed
+    # body, e.g. ...schema} + \sphinxhyphen{} + driven writer...)
+    rendered = _render_row_region(
+        _hoist_repeated_phrases(edit.inner or []), markup
+    )
     # the parse absorbs a longtable tail (``\endfoot\endlastfoot``)
     # into the first data row node's text; when the surrounding
     # prefix already carries the tail, drop the duplicate from the

@@ -107,6 +107,18 @@ def _align_plain(old: list[Node], new: list[Node]) -> list[Edit]:
     def _pair(o: Node, n: Node) -> Edit:
         if o.text == n.text:
             return Match(node=o)
+        if not (o.text or "").strip() and not (n.text or "").strip():
+            # whitespace-only pair: the two revisions differ only in
+            # how many blank lines separate two paragraphs. A Modify
+            # here renders as a del-block + add-block pair, and the
+            # marker glue pass then collapses the blank line BETWEEN
+            # those markers - the paragraph break both revisions had
+            # disappears, and the next paragraph's \sphinxAtStartPar
+            # (a \leavevmode, NOT a \par) leaves its first line glued
+            # to the previous one. Keep the NEW bytes verbatim: the
+            # break survives and no change is marked for invisible
+            # whitespace.
+            return Match(node=n)
         if o.kind == "row" and n.kind == "row" and o.name == n.name:
             # equal row signature (content key) with differing text
             # means the difference is purely structural: \hline on
